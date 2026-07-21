@@ -1,0 +1,45 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Generated log exports
+.test-output/
+CCXLOG/
+CXLOG/
+CCLOG/
+
+# Package archives
+*.tgz
+
+# Logs
+*.log
+npm-debug.log*
+
+# Environment variables
+.env
+.env.*
+
+# OS files
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Editor files
+.vscode/
+.idea/
+
+# AI tool local settings
+.claude/settings.local.json
+.codex/
+
+# Japanese design/process docs & tournament records — kept on disk, never committed (OSS)
+/spec/
+/unite/
+/ccxlog-spec.md
+/IMPL_NOTES.md
+/KNOWN_ISSUES.md
+
+# Local AI tooling & skills — never part of the published CLI
+/.claude/

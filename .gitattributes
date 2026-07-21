@@ -1,0 +1,7 @@
+# Normalize line endings to LF for all text files
+* text=auto eol=lf
+
+# Binary files (let Git detect, but be explicit for common ones)
+*.png binary
+*.jpg binary
+*.gz binary

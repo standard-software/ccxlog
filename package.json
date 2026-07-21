@@ -1,0 +1,57 @@
+{
+  "private": false,
+  "name": "@standard-software/ccxlog",
+  "version": "1.0.0",
+  "description": "Discover and merge Claude Code and Codex CLI session logs (JSONL) into a single readable Markdown timeline.",
+  "type": "module",
+  "bin": {
+    "ccxlog": "dist/index.js"
+  },
+  "files": [
+    "dist",
+    "templates",
+    "README.md",
+    "README_Japanese.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "dev": "tsx src/index.ts",
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "pretest": "tsc",
+    "test": "node --test \"tests/*.test.mjs\""
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/standard-software/ccxlog.git"
+  },
+  "keywords": [
+    "claude-code",
+    "codex",
+    "jsonl",
+    "markdown",
+    "log"
+  ],
+  "author": "Satoshi Yamamoto <standard.software.net@gmail.com>",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/standard-software/ccxlog/issues"
+  },
+  "homepage": "https://github.com/standard-software/ccxlog#readme",
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "tsx": "^4.7.0",
+    "typescript": "^5.4.0"
+  },
+  "dependencies": {},
+  "overrides": {
+    "esbuild": "0.28.1"
+  }
+}
