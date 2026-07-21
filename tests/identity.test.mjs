@@ -5,7 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   assignCcxids, safeSessionId, encodeSid64, decodeSid64,
-  parseCcxid, parseDatetime, chooseMethod, regionFromLine, isDestructive,
+  parseCcxlogId, chooseMethod, regionFromLine, isDestructive,
 } from '../dist/lib/identity.js';
 
 const SRC = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'src');
@@ -54,10 +54,10 @@ test('ccxid: the \\0 separator still delimits fields at runtime (no boundary amb
   assert.notEqual(p1.ccxid, p2.ccxid);
 });
 
-test('ccxid: 24 hex digits and ccxid: prefix', () => {
+test('ccxlogId: 24 hex digits and ccxlogid: prefix', () => {
   const p = mkPair();
   assignCcxids([p]);
-  assert.match(p.ccxid, /^ccxid:[0-9a-f]{24}$/);
+  assert.match(p.ccxid, /^ccxlogid:[0-9a-f]{24}$/);
 });
 
 test('ccxid: answer / model / tokens / absolute path do NOT change it', () => {
@@ -135,39 +135,39 @@ test('sid64: undecodable value returns null (never deleted)', () => {
   assert.equal(decodeSid64('has spaces'), null);
 });
 
-test('block parsing: ccxid markers, 40-hyphen noise does not split blocks', () => {
+test('block parsing: ccxlogid markers, 40-hyphen noise does not split blocks', () => {
   const body = [
-    '<!-- ccxlog-pair:ccxid:aaaaaaaaaaaaaaaaaaaaaaaa -->',
+    '<!-- ccxlogid:aaaaaaaaaaaaaaaaaaaaaaaa -->',
     '# heading', 'answer with a rule:', '----------------------------------------',
     'more answer',
-    '<!-- ccxlog-pair:ccxid:bbbbbbbbbbbbbbbbbbbbbbbb -->',
+    '<!-- ccxlogid:bbbbbbbbbbbbbbbbbbbbbbbb -->',
     'second',
   ].join('\n');
-  const p = parseCcxid(body);
+  const p = parseCcxlogId(body);
   assert.equal(p.count, 2);
   assert.ok(p.valid);
-  assert.deepEqual(p.ids, ['ccxid:aaaaaaaaaaaaaaaaaaaaaaaa', 'ccxid:bbbbbbbbbbbbbbbbbbbbbbbb']);
+  assert.deepEqual(p.ids, ['ccxlogid:aaaaaaaaaaaaaaaaaaaaaaaa', 'ccxlogid:bbbbbbbbbbbbbbbbbbbbbbbb']);
 });
 
-test('block parsing: chooseMethod prefers ccxid, isDestructive on id loss', () => {
-  const oldBody = '<!-- ccxlog-pair:ccxid:aaaaaaaaaaaaaaaaaaaaaaaa -->\nx\n<!-- ccxlog-pair:ccxid:bbbbbbbbbbbbbbbbbbbbbbbb -->\ny';
-  const newDrop = '<!-- ccxlog-pair:ccxid:aaaaaaaaaaaaaaaaaaaaaaaa -->\nx';
+test('block parsing: chooseMethod uses ccxlogid and isDestructive on id loss', () => {
+  const oldBody = '<!-- ccxlogid:aaaaaaaaaaaaaaaaaaaaaaaa -->\nx\n<!-- ccxlogid:bbbbbbbbbbbbbbbbbbbbbbbb -->\ny';
+  const newDrop = '<!-- ccxlogid:aaaaaaaaaaaaaaaaaaaaaaaa -->\nx';
   const { method } = chooseMethod(oldBody, newDrop);
-  assert.equal(method, 'ccxid');
-  assert.equal(isDestructive(oldBody, newDrop, 'ccxid'), true);   // bbbb… vanished
-  assert.equal(isDestructive(oldBody, oldBody, 'ccxid'), false);
+  assert.equal(method, 'ccxlogid');
+  assert.equal(isDestructive(oldBody, newDrop, 'ccxlogid'), true);   // bbbb… vanished
+  assert.equal(isDestructive(oldBody, oldBody, 'ccxlogid'), false);
 });
 
-test('block parsing: datetime fallback for legacy templates', () => {
+test('block parsing: datetime headings are not identities', () => {
   const body = '# 2026/05/27 Wed 11:03:49   [Codex]\ntext';
-  assert.equal(parseCcxid(body).count, 0);
-  assert.equal(parseDatetime(body).count, 1);
+  assert.equal(parseCcxlogId(body).count, 0);
+  assert.equal(chooseMethod(body, body).method, 'none');
 });
 
 test('regionFromLine: slices from the first marker line to EOF', () => {
-  const body = 'preamble\n<!-- ccxlog-pair:ccxid:aaaaaaaaaaaaaaaaaaaaaaaa -->\nblock';
+  const body = 'preamble\n<!-- ccxlogid:aaaaaaaaaaaaaaaaaaaaaaaa -->\nblock';
   const region = regionFromLine(body, 1);
-  assert.ok(region.startsWith('<!-- ccxlog-pair:'));
+  assert.ok(region.startsWith('<!-- ccxlogid:'));
   assert.ok(!region.includes('preamble'));
 });
 
@@ -192,11 +192,9 @@ test('ccxid: twin assignment is order-independent (collision ordinal by question
   assert.deepEqual(byOrdinal(a), byOrdinal(b));
 });
 
-test('block parsing: duplicate / malformed pair markers make the ccxid method unsafe (none)', () => {
+test('block parsing: duplicate / malformed ccxlogid markers make the method unsafe (none)', () => {
   const owner = '<!-- ccxlog-owner:ccxlog; kind:aggregate; mode:both -->';
-  const malformed = owner + '\n<!-- ccxlog-pair:not-a-real-id -->\nbody\n';
-  const good = owner + '\n<!-- ccxlog-pair:ccxid:aaaaaaaaaaaaaaaaaaaaaaaa -->\nx\n';
-  // Old side has a ccxlog-pair line that is not a valid 24-hex marker and no
-  // DateTime heading => the comparison is unidentifiable, never falsely "clean".
+  const malformed = owner + '\n<!-- ccxlogid:not-a-real-id -->\nbody\n';
+  const good = owner + '\n<!-- ccxlogid:aaaaaaaaaaaaaaaaaaaaaaaa -->\nx\n';
   assert.equal(chooseMethod(malformed, good).method, 'none');
 });

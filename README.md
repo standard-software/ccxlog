@@ -219,7 +219,7 @@ A template can use the following placeholders:
 | `%DateTime%`      | Question timestamp (`YYYY/MM/DD Day HH:MM:SS`)            |
 | `%Source%`        | The tool that produced the pair — `ClaudeCode` or `Codex` |
 | `%SourceShort%`   | Short source tag — `cc` or `cx`                          |
-| `%PairId%`        | `ccxid` — an answer-independent, cross-tool-stable id used as the block's identity marker |
+| `%CcxlogId%`      | `ccxlogid` — an answer-independent, cross-tool-stable id used as the block's identity marker |
 | `%SessionId%`     | The session id                                           |
 | `%SessionName%`   | Human-readable session name — the custom title if set, else the tool's auto-generated title, else empty |
 | `%Question%`      | The user's message                                       |
@@ -256,13 +256,12 @@ point at the local copy. After that, edit the copied file directly. Re-running
 `--init-template` when the destination already exists prints an error and does
 not overwrite, but still re-applies the config rewrite.
 
-> **⚠️ Keep the first two lines: the `<!-- ccxlog-pair:%PairId% -->` marker and
-> the `# %DateTime%` header.**
-> The automatic pre-overwrite backup (see Notes below) identifies each Q&A block
-> by these markers. If your custom template drops them, no block has an identity
-> anymore and the detector goes blind: the backup will never fire again, even
-> when pairs genuinely vanish from the output. All six bundled templates keep
-> this form — customize anything you like after them.
+The formal identity marker is the exact standalone line
+`<!-- %CcxlogId% -->`, rendered as `<!-- ccxlogid:<24 hex digits> -->`. You may
+place that line anywhere in a custom template. If it is absent — even when
+`%CcxlogId%` appears inline elsewhere for display — ccxlog automatically prepends
+the formal marker to every Q&A block. `%DateTime%` is human-readable metadata,
+not a block identity.
 
 ## Output format
 
@@ -270,9 +269,9 @@ not overwrite, but still re-applies the config rewrite.
 rendered from the template. By default (English template):
 
 ```markdown
-<!-- ccxlog-pair:ccxid:1f3c... -->
+<!-- ccxlogid:1f3c... -->
 # 2026/05/27 Wed 11:03:49   [ClaudeCode] Session:My first session:ec5e9974-...
-Source=ClaudeCode Model=claude-opus-4-8 Version=2.1.205
+Model=claude-opus-4-8 Version=2.1.205
 Branch=main Cwd=C:\Users\satoshi\projects\my-app
 Tokens=in 6, out 33, cache read 21,758, cache write 8,730
 ## Question

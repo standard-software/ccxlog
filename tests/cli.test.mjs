@@ -27,8 +27,9 @@ test('mode both: merges Claude + Codex into ccxlog.md with correct %Source%', ()
     const file = path.join(s.out, 'ccxlog.md');
     assert.equal(countPairs(file), 2);
     const text = fs.readFileSync(file, 'utf-8');
-    assert.ok(text.includes('Source=ClaudeCode') && text.includes('[ClaudeCode]'));
-    assert.ok(text.includes('Source=Codex') && text.includes('[Codex]'));
+    assert.ok(text.includes('[ClaudeCode]'));
+    assert.ok(text.includes('[Codex]'));
+    assert.doesNotMatch(text, /^Source=(?:ClaudeCode|Codex)/m);
   } finally { s.cleanup(); }
 });
 

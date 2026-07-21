@@ -90,10 +90,10 @@ export function sha256(buf) {
   return crypto.createHash('sha256').update(buf).digest('hex');
 }
 
-// Count ccxlog-pair markers in a rendered file.
+// Count formal ccxlogid markers in a rendered file.
 export function countPairs(filePath) {
   const text = fs.readFileSync(filePath, 'utf-8');
-  return (text.match(/<!-- ccxlog-pair:ccxid:[0-9a-f]{24} -->/g) ?? []).length;
+  return (text.match(/<!-- ccxlogid:[0-9a-f]{24} -->/g) ?? []).length;
 }
 
 // ---------------------------------------------------------------------------

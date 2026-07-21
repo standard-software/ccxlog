@@ -12,7 +12,7 @@ const OWNER = '<!-- ccxlog-owner:ccxlog; kind:aggregate; mode:both -->';
 function agg(blocks) {
   return [OWNER, '<!-- notice -->', '# ccxlog', '', '- Project: x', '- Source: Codex', '', '', blocks].join('\n');
 }
-const block = (id) => `<!-- ccxlog-pair:ccxid:${id} -->\n# 2026/05/27 Wed 11:03:49\ncontent\n\n`;
+const block = (id) => `<!-- ccxlogid:${id} -->\n# 2026/05/27 Wed 11:03:49\ncontent\n\n`;
 const A = 'aaaaaaaaaaaaaaaaaaaaaaaa';
 const B = 'bbbbbbbbbbbbbbbbbbbbbbbb';
 
@@ -60,10 +60,21 @@ test('smart-write: template-only change keeps ids -> non-destructive rewrite', a
   const { dir, file } = tmpFile();
   try {
     await commitPlan((await planWrite(file, agg(block(A)), 'aggregate')).plan, { dryRun: false, alreadyBackedUp: false });
-    const reworded = agg(`<!-- ccxlog-pair:ccxid:${A} -->\n# 2026/05/27 Wed 11:03:49\nDIFFERENT body\n\n`);
+    const reworded = agg(`<!-- ccxlogid:${A} -->\n# 2026/05/27 Wed 11:03:49\nDIFFERENT body\n\n`);
     const plan = (await planWrite(file, reworded, 'aggregate')).plan;
     assert.equal(plan.outcome, 'rewrite');
     assert.equal(plan.destructive, false); // id A still present
+  } finally { rmrf(dir); }
+});
+
+test('migration from the removed marker format is a destructive rewrite', async () => {
+  const { dir, file } = tmpFile();
+  try {
+    const old = agg(`<!-- ccxlog-pair:ccxid:${A} -->\n# 2026/05/27 Wed 11:03:49\ncontent\n\n`);
+    fs.writeFileSync(file, old, 'utf-8');
+    const plan = (await planWrite(file, agg(block(A)), 'aggregate')).plan;
+    assert.equal(plan.outcome, 'rewrite');
+    assert.equal(plan.destructive, true);
   } finally { rmrf(dir); }
 });
 

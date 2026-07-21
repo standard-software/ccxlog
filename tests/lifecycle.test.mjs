@@ -73,9 +73,9 @@ test('changing only the template (all ids kept) does NOT back up', t => {
   writeJsonl(path.join(ws.ccLogs, 'a.jsonl'), claudeQA(ws.project, { uuid: 'a', q: 'stable' }));
   assert.equal(run([ws.project, '--out', ws.out, '-cc'], { home: ws.home }).status, 0);
 
-  // A custom template with the same %PairId% marker so ccxids still match.
+  // A custom template with the same %CcxlogId% marker so identities still match.
   writeRaw(path.join(ws.out, 'templates', 'alt.md'),
-    '<!-- ccxlog-pair:%PairId% -->\n# %DateTime% [%Source%]\nSource=%Source%\nQ: %Question%\nA: %Answer%\n\n----------------------------------------\n\n');
+    '<!-- %CcxlogId% -->\n# %DateTime% [%Source%]\nQ: %Question%\nA: %Answer%\n\n----------------------------------------\n\n');
   writeConfig(ws.out, { claude: { extraLogDirs: [ws.ccLogs] }, template: 'templates/alt.md' });
   const r = run([ws.project, '--out', ws.out, '-cc'], { home: ws.home });
   assert.match(r.stdout, /\[rewrite\]/);

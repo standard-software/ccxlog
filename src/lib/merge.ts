@@ -37,7 +37,7 @@ const SUBSEQUENCE_LIMIT = 64;
 // old snapshot and a later answered copy of the same question land in the same
 // candidate group and reach confirmDuplicate() (which is what lets the answered
 // copy supersede the empty one below). This is the answer-independent dedupe
-// key; it is unrelated to the answer-independent ccxid material (§9.2), which
+// key; it is unrelated to the answer-independent ccxlogId material (§9.2), which
 // serves a different purpose. NUL (\0) joins the fields so a boundary can't be
 // injected by content that itself contains spaces.
 function dupKey(p: UnifiedPair): string {

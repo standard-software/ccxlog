@@ -11,7 +11,7 @@ import {
   formatToolResultSummary,
   toBlocks,
 } from './contentFormatter.js';
-import { renderTemplate } from './templates.js';
+import { renderTemplate, templateHasCcxlogIdMarker } from './templates.js';
 import {
   extractModel,
   extractVersion,
@@ -202,11 +202,11 @@ export function toUnifiedPair(p: UnifyParams): UnifiedPair {
 }
 
 export function formatPair(u: UnifiedPair, template: string): string {
-  return renderTemplate(template, {
+  const rendered = renderTemplate(template, {
     DateTime: formatDateTime(u),
     Source: u.sourceLabel,
     SourceShort: u.source === 'claude' ? 'cc' : 'cx',
-    PairId: u.ccxid,
+    CcxlogId: u.ccxid,
     SessionId: u.sessionId,
     SessionName: u.sessionName,
     Question: u.question,
@@ -219,6 +219,8 @@ export function formatPair(u: UnifiedPair, template: string): string {
     Cwd: u.cwd,
     Tokens: formatTokens(u.tokens),
   });
+  if (templateHasCcxlogIdMarker(template)) return rendered;
+  return `<!-- ${u.ccxid} -->\n${rendered}`;
 }
 
 // ---- preambles -----------------------------------------------------------

@@ -3,12 +3,12 @@
 // via ccxlog.config.json's "template" field (resolution order: §4.5).
 //
 // Placeholders (case-sensitive, surrounded by %): %DateTime% %Source%
-// %SourceShort% %PairId% %SessionId% %SessionName% %Question% %Progress%
+// %SourceShort% %CcxlogId% %SessionId% %SessionName% %Question% %Progress%
 // %ProgressFull% %Answer% %Model% %Version% %GitBranch% %Cwd% %Tokens%.
 
-export const DEFAULT_TEMPLATE = `<!-- ccxlog-pair:%PairId% -->
+export const DEFAULT_TEMPLATE = `<!-- %CcxlogId% -->
 # %DateTime%   [%Source%] Session:%SessionName%:%SessionId%
-Source=%Source% Model=%Model% Version=%Version%
+Model=%Model% Version=%Version%
 Branch=%GitBranch% Cwd=%Cwd%
 Tokens=%Tokens%
 ## Question
@@ -34,10 +34,17 @@ export function templateHasSource(tpl: string): boolean {
   return tpl.includes('%Source%');
 }
 
+// Only this exact standalone line is a formal identity marker. A CcxlogId
+// placeholder used anywhere else is display-only; formatPair prepends the
+// formal marker so later runs can identify block boundaries without ambiguity.
+export function templateHasCcxlogIdMarker(tpl: string): boolean {
+  return tpl.split(/\r?\n/).some(line => line === '<!-- %CcxlogId% -->');
+}
+
 // Every placeholder renderTemplate knows about (§7.2). Anything else shaped
 // like %Name% is left verbatim in the output and reported once via --verbose.
 export const KNOWN_PLACEHOLDERS = new Set([
-  'DateTime', 'Source', 'SourceShort', 'PairId', 'SessionId', 'SessionName',
+  'DateTime', 'Source', 'SourceShort', 'CcxlogId', 'SessionId', 'SessionName',
   'Question', 'Progress', 'ProgressFull', 'Answer', 'Model', 'Version',
   'GitBranch', 'Cwd', 'Tokens',
 ]);

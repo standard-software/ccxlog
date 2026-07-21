@@ -2,6 +2,19 @@
 
 ## Version
 
+### 1.1.0
+#### 2026/07/22(Wed)
+- replace the `%PairId%` / `ccxid:` identity format with the clearer
+  `%CcxlogId%` / `ccxlogid:` format; the formal rendered marker is
+  `<!-- ccxlogid:<24 hex digits> -->`
+- automatically prepend the formal identity marker to every Q&A block when a
+  custom template lacks the exact standalone `<!-- %CcxlogId% -->` line
+- remove datetime-based block identity and the old `ccxlog-pair:ccxid:` parser;
+  the first 1.1.0 rewrite of an older output is therefore backed up
+  conservatively before migration
+- remove the duplicated `Source=` field from all six bundled templates while
+  keeping the source label in the heading
+
 ### 1.0.2
 #### 2026/07/22(Wed)
 - make `-h` show that the merged, `-cc`, and `-cx` aggregate output filenames

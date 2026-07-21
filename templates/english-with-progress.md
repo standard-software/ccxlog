@@ -1,6 +1,6 @@
-<!-- ccxlog-pair:%PairId% -->
+<!-- %CcxlogId% -->
 # %DateTime%   [%Source%] Session:%SessionName%:%SessionId%
-Source=%Source% Model=%Model% Version=%Version%
+Model=%Model% Version=%Version%
 Branch=%GitBranch% Cwd=%Cwd%
 Tokens=%Tokens%
 ## Question
@@ -14,4 +14,3 @@ Tokens=%Tokens%
 -->
 
 ----------------------------------------
-

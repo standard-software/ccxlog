@@ -45,7 +45,7 @@ test('a template with both %Progress% and %ProgressFull% substitutes both and wa
   const ws = workspace(t);
   writeJsonl(path.join(ws.ccLogs, 'a.jsonl'), claudeWithProgress(ws.project));
   writeRaw(path.join(ws.out, 'templates', 'both.md'),
-    '<!-- ccxlog-pair:%PairId% -->\n# %DateTime% [%Source%]\nSummary:%Progress%\nFull:%ProgressFull%\nA:%Answer%\n\n----------------------------------------\n\n');
+    '<!-- %CcxlogId% -->\n# %DateTime% [%Source%]\nSummary:%Progress%\nFull:%ProgressFull%\nA:%Answer%\n\n----------------------------------------\n\n');
   writeConfig(ws.out, { claude: { extraLogDirs: [ws.ccLogs] }, template: 'templates/both.md' });
 
   const r = run([ws.project, '--out', ws.out, '-cc'], { home: ws.home });
@@ -79,7 +79,7 @@ test('a template without %Source% and with an unknown placeholder warns (generat
   const ws = workspace(t);
   writeJsonl(path.join(ws.ccLogs, 'a.jsonl'), claudeQA(ws.project));
   writeRaw(path.join(ws.out, 'templates', 'weird.md'),
-    '<!-- ccxlog-pair:%PairId% -->\n# %DateTime%\n%Question%\n%Bogus%\n%Answer%\n\n----------------------------------------\n\n');
+    '<!-- %CcxlogId% -->\n# %DateTime%\n%Question%\n%Bogus%\n%Answer%\n\n----------------------------------------\n\n');
   writeConfig(ws.out, { claude: { extraLogDirs: [ws.ccLogs] }, template: 'templates/weird.md' });
   const r = run([ws.project, '--out', ws.out, '-cc'], { home: ws.home });
   assert.equal(r.status, 0, r.stderr);
@@ -94,6 +94,30 @@ test('a template without %Source% and with an unknown placeholder warns (generat
   const v = run([ws.project, '--out', ws.out, '-cc', '--verbose'], { home: ws.home });
   assert.equal(v.status, 0, v.stderr);
   assert.match(v.stderr, /unknown placeholder/);
+});
+
+test('a template without a standalone CcxlogId marker gets one prepended', t => {
+  const ws = workspace(t);
+  writeJsonl(path.join(ws.ccLogs, 'a.jsonl'), claudeQA(ws.project));
+  writeRaw(path.join(ws.out, 'templates', 'no-marker.md'),
+    '# %DateTime% [%Source%]\n%Question%\n%Answer%\n\n----------------------------------------\n\n');
+  writeConfig(ws.out, { claude: { extraLogDirs: [ws.ccLogs] }, template: 'templates/no-marker.md' });
+  const r = run([ws.project, '--out', ws.out, '-cc'], { home: ws.home });
+  assert.equal(r.status, 0, r.stderr);
+  const md = read(path.join(ws.out, 'cclog.md'));
+  assert.match(md, /<!-- ccxlogid:[0-9a-f]{24} -->\n# /);
+});
+
+test('an inline CcxlogId placeholder is display-only and still gets a formal marker prepended', t => {
+  const ws = workspace(t);
+  writeJsonl(path.join(ws.ccLogs, 'a.jsonl'), claudeQA(ws.project));
+  writeRaw(path.join(ws.out, 'templates', 'inline-id.md'),
+    '# %DateTime% [%Source%]\nID=%CcxlogId%\n%Question%\n%Answer%\n\n----------------------------------------\n\n');
+  writeConfig(ws.out, { claude: { extraLogDirs: [ws.ccLogs] }, template: 'templates/inline-id.md' });
+  const r = run([ws.project, '--out', ws.out, '-cc'], { home: ws.home });
+  assert.equal(r.status, 0, r.stderr);
+  const md = read(path.join(ws.out, 'cclog.md'));
+  assert.match(md, /<!-- (ccxlogid:[0-9a-f]{24}) -->\n# .*\nID=\1/);
 });
 
 test('placeholders inside question/answer content are kept literal (not re-substituted)', t => {
@@ -120,6 +144,7 @@ test('bundled japanese template keeps %Source% tokens and renders headings', t =
   assert.equal(run([ws.project, '--out', ws.out, '-cc'], { home: ws.home }).status, 0);
   const md = read(path.join(ws.out, 'cclog.md'));
   assert.match(md, /\[ClaudeCode\]/);
-  assert.match(md, /Source=ClaudeCode/);
+  assert.doesNotMatch(md, /^Source=ClaudeCode/m);
+  assert.match(md, /^Model=claude-opus-4-8 Version=/m);
   assert.match(md, /## 質問/);
 });

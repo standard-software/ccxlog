@@ -86,7 +86,7 @@ export interface UnifiedPair {
   gitBranch: string;
   cwd: string;
   tokens: TokenTotals;
-  ccxid: string;                      // assigned later (§9.2), "ccxid:<hex24>"
+  ccxid: string;                      // internal field, rendered as "ccxlogid:<hex24>"
   // Internal (not rendered): carried from SessionData for logical dedupe (§6.3).
   fileContentHash: string;
   eventIdStreamHash: string[];

@@ -82,9 +82,9 @@ test('after --init-template the local copy wins over the bundled default', t => 
   const ws = workspace(t);
   writeJsonl(path.join(ws.ccLogs, 'a.jsonl'), claudeQA(ws.project, { q: 'q', a: 'a' }));
   assert.equal(run([ws.project, '--out', ws.out, '--init-template'], { home: ws.home }).status, 0);
-  // Edit the local copy with a distinctive marker, keeping %PairId%.
+  // Edit the local copy with a distinctive marker, keeping %CcxlogId%.
   writeRaw(path.join(ws.out, 'templates', 'english.md'),
-    '<!-- ccxlog-pair:%PairId% -->\nLOCAL-COPY [%Source%] %Question%\n\n----------------------------------------\n\n');
+    '<!-- %CcxlogId% -->\nLOCAL-COPY [%Source%] %Question%\n\n----------------------------------------\n\n');
   // Re-point discovery (init-template wrote a minimal config).
   const cfg = JSON.parse(read(path.join(ws.out, 'ccxlog.config.json')));
   cfg.claude = { ...(cfg.claude || {}), extraLogDirs: [ws.ccLogs] };

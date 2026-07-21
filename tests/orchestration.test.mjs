@@ -36,7 +36,7 @@ test('CX#2: an older snapshot that is a strict prefix collapses onto the longest
   assert.match(md, /question one/, 'the shared first pair is present');
   assert.match(md, /question two/, 'the pair unique to the newer snapshot must NOT be dropped');
   // The shared first pair is emitted once (the older snapshot is deduped away).
-  assert.equal((md.match(/ccxlog-pair:/g) || []).length, 2, 'exactly two pairs after the collapse');
+  assert.equal((md.match(/<!-- ccxlogid:[0-9a-f]{24} -->/g) || []).length, 2, 'exactly two pairs after the collapse');
   assert.match(r.stdout, /De-duplicated 1 logical duplicate pair/);
 });
 

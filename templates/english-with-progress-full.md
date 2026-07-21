@@ -1,7 +1,7 @@
-<!-- ccxlog-pair:%PairId% -->
+<!-- %CcxlogId% -->
 <!-- NOTE: %ProgressFull% includes raw tool input/output, which may contain secrets. -->
 # %DateTime%   [%Source%] Session:%SessionName%:%SessionId%
-Source=%Source% Model=%Model% Version=%Version%
+Model=%Model% Version=%Version%
 Branch=%GitBranch% Cwd=%Cwd%
 Tokens=%Tokens%
 ## Question
@@ -15,4 +15,3 @@ Tokens=%Tokens%
 -->
 
 ----------------------------------------
-

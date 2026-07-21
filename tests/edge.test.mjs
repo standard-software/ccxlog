@@ -17,7 +17,8 @@ test('mode both succeeds from one source when the other has no logs', t => {
   assert.equal(r.status, 0, r.stderr);
   const md = read(path.join(ws.out, 'ccxlog.md'));
   assert.match(md, /solo claude/);
-  assert.match(md, /Source=ClaudeCode/);
+  assert.match(md, /\[ClaudeCode\]/);
+  assert.doesNotMatch(md, /^Source=ClaudeCode/m);
   assert.doesNotMatch(md, /Source=Codex/);
 });
 

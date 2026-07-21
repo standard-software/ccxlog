@@ -1,7 +1,7 @@
 import { sha256Hex, sha256HexBytes } from './pathUtils.js';
 import type { UnifiedPair } from './types.js';
 
-// ---- ccxid (answer-independent stable id, hex 24 / 96-bit) — §9.2 --------
+// ---- ccxlogId (answer-independent stable id, hex 24 / 96-bit) — §9.2 -----
 
 function questionKeyOf(u: UnifiedPair): string {
   return u.questionEventUuid && u.questionEventUuid.length
@@ -10,7 +10,7 @@ function questionKeyOf(u: UnifiedPair): string {
 }
 
 // Assign collisionOrdinal within each (source, sessionId, questionTimestampRaw)
-// group, then compute the ccxid. Mutates each pair's `ccxid` field.
+// group, then compute the ccxlogId. Mutates each pair's internal `ccxid` field.
 export function assignCcxids(pairs: UnifiedPair[]): void {
   const groups = new Map<string, UnifiedPair[]>();
   for (const p of pairs) {
@@ -39,7 +39,7 @@ export function assignCcxids(pairs: UnifiedPair[]): void {
     arr.forEach((p, i) => {
       const sessionKey = p.sessionId || p.sourceFileRelativeId;
       const material = `${p.source}\0${sessionKey}\0${p.questionTimestampRaw}\0${questionKeyOf(p)}\0${i}`;
-      p.ccxid = `ccxid:${sha256HexBytes(material, 24)}`;
+      p.ccxid = `ccxlogid:${sha256HexBytes(material, 24)}`;
     });
   }
 }
@@ -102,28 +102,27 @@ export function safeSessionId(sessionId: string, sourceFileRelativeId: string): 
 
 // ---- block parsing (§9.1) ------------------------------------------------
 
-export type BlockMethod = 'ccxid' | 'datetime' | 'none';
+export type BlockMethod = 'ccxlogid' | 'none';
 
-const CCXID_MARKER_RE = /^<!-- ccxlog-pair:(ccxid:[0-9a-f]{24}) -->$/;
-const CCXID_LOOSE_RE = /^<!-- ccxlog-pair:/;
-const DATETIME_ID_RE = /^# \d{4}\/\d{2}\/\d{2} \w{3} \d{2}:\d{2}:\d{2}/;
+const CCXLOG_ID_MARKER_RE = /^<!-- (ccxlogid:[0-9a-f]{24}) -->$/;
+const CCXLOG_ID_LOOSE_RE = /^<!-- ccxlogid:/;
 
-export interface CcxidParse {
+export interface CcxlogIdParse {
   count: number;
   ids: string[];
-  valid: boolean;          // no duplicate ids and no malformed ccxlog-pair lines
+  valid: boolean;          // no duplicate ids and no malformed ccxlogid lines
   firstLineIndex: number;  // -1 if none
 }
 
-export function parseCcxid(content: string): CcxidParse {
+export function parseCcxlogId(content: string): CcxlogIdParse {
   const lines = content.split('\n');
   const ids: string[] = [];
   let invalid = false;
   let firstLineIndex = -1;
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
-    if (!CCXID_LOOSE_RE.test(line)) continue;
-    const m = CCXID_MARKER_RE.exec(line);
+    if (!CCXLOG_ID_LOOSE_RE.test(line)) continue;
+    const m = CCXLOG_ID_MARKER_RE.exec(line);
     if (m) {
       if (firstLineIndex === -1) firstLineIndex = i;
       ids.push(m[1]);
@@ -135,41 +134,16 @@ export function parseCcxid(content: string): CcxidParse {
   return { count: ids.length, ids, valid: !invalid && !dup, firstLineIndex };
 }
 
-export interface DatetimeParse {
-  count: number;
-  ids: string[];
-  firstLineIndex: number;
-}
-
-export function parseDatetime(content: string): DatetimeParse {
-  const lines = content.split('\n');
-  const ids: string[] = [];
-  let firstLineIndex = -1;
-  for (let i = 0; i < lines.length; i++) {
-    const m = DATETIME_ID_RE.exec(lines[i]);
-    if (m) {
-      if (firstLineIndex === -1) firstLineIndex = i;
-      ids.push(m[0]);
-    }
-  }
-  return { count: ids.length, ids, firstLineIndex };
-}
-
 // Choose the comparison method between two document bodies (§9.1).
 export function chooseMethod(oldContent: string, newContent: string): {
   method: BlockMethod;
   oldFirstLine: number;
   newFirstLine: number;
 } {
-  const oc = parseCcxid(oldContent);
-  const nc = parseCcxid(newContent);
+  const oc = parseCcxlogId(oldContent);
+  const nc = parseCcxlogId(newContent);
   if (oc.count > 0 && nc.count > 0 && oc.valid && nc.valid) {
-    return { method: 'ccxid', oldFirstLine: oc.firstLineIndex, newFirstLine: nc.firstLineIndex };
-  }
-  const od = parseDatetime(oldContent);
-  const nd = parseDatetime(newContent);
-  if (od.count > 0 && nd.count > 0) {
-    return { method: 'datetime', oldFirstLine: od.firstLineIndex, newFirstLine: nd.firstLineIndex };
+    return { method: 'ccxlogid', oldFirstLine: oc.firstLineIndex, newFirstLine: nc.firstLineIndex };
   }
   return { method: 'none', oldFirstLine: -1, newFirstLine: -1 };
 }
@@ -181,8 +155,7 @@ export function regionFromLine(content: string, lineIndex: number): string {
 }
 
 export function idsByMethod(content: string, method: BlockMethod): string[] {
-  if (method === 'ccxid') return parseCcxid(content).ids;
-  if (method === 'datetime') return parseDatetime(content).ids;
+  if (method === 'ccxlogid') return parseCcxlogId(content).ids;
   return [];
 }
 
