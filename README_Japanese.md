@@ -160,6 +160,24 @@ ccxlog --backup-jsonl
 Windows ではバックスラッシュをエスケープしたパス（`C:\\Users\\...`）、
 Ubuntu/macOS ではスラッシュ区切りのパス（`/home/you/...`）を使います。
 
+例えば、3種類の集約出力ファイル名をそれぞれ独立して変更できます:
+
+```json
+{
+  "outputAllFileName": "ALL_AI_LOG.md",
+  "claude": {
+    "outputAllFileName": "CLAUDE_LOG.md"
+  },
+  "codex": {
+    "outputAllFileName": "CODEX_LOG.md"
+  }
+}
+```
+
+この設定では、`ccxlog` は `ALL_AI_LOG.md`、`ccxlog -cc` は
+`CLAUDE_LOG.md`、`ccxlog -cx` は `CODEX_LOG.md` を出力します。
+モード間で誤って上書きしないよう、3つには異なる名前を指定してください。
+
 ### トップレベル（両ソース共通）
 
 | フィールド                | 説明                                                                        |

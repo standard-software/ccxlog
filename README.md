@@ -163,6 +163,24 @@ or `codex` namespace:
 Use backslash-escaped paths on Windows (`C:\\Users\\...`) and forward-slash paths
 on Ubuntu/macOS (`/home/you/...`).
 
+For example, all three aggregate output filenames can be changed independently:
+
+```json
+{
+  "outputAllFileName": "ALL_AI_LOG.md",
+  "claude": {
+    "outputAllFileName": "CLAUDE_LOG.md"
+  },
+  "codex": {
+    "outputAllFileName": "CODEX_LOG.md"
+  }
+}
+```
+
+With this configuration, `ccxlog` writes `ALL_AI_LOG.md`, `ccxlog -cc` writes
+`CLAUDE_LOG.md`, and `ccxlog -cx` writes `CODEX_LOG.md`. The three names must be
+different so that one mode cannot overwrite another mode's output.
+
 ### Top-level (both sources)
 
 | Field                     | Description                                                                 |

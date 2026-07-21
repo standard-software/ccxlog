@@ -2,6 +2,14 @@
 
 ## Version
 
+### 1.0.2
+#### 2026/07/22(Wed)
+- make `-h` show that the merged, `-cc`, and `-cx` aggregate output filenames
+  are independently configurable in `<out>/ccxlog.config.json`, including their
+  exact keys and defaults
+- add concrete English and Japanese README examples for renaming all three
+  aggregate output files
+
 ### 1.0.1
 #### 2026/07/22(Wed)
 - document the difference between

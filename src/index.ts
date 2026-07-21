@@ -685,8 +685,8 @@ Arguments:
   project-path           Project directory (defaults to the current directory).
 
 Options:
-  -cc, --claude-only     Claude Code logs only  -> CCXLOG/cclog.md
-  -cx, --codex-only      Codex logs only        -> CCXLOG/cxlog.md
+  -cc, --claude-only     Claude Code logs only (default output: cclog.md).
+  -cx, --codex-only      Codex logs only (default output: cxlog.md).
   --source <s>           Explicit form of the above: both|claude|codex (default both).
   --out <dir>            Output directory (default: <project-path>/CCXLOG).
   --per-session          Write one file per session (cclog_<id>.md / cxlog_<id>.md).
@@ -701,9 +701,14 @@ Options:
   -v, -V, --version      Show version and exit.
   -h, --help             Show this help.
 
-Aggregate outputs (ccxlog.md / cclog.md / cxlog.md) coexist in <out>; each mode
-only touches its own file. Progress rendering is controlled by the template
-(%Progress% / %ProgressFull%).`);
+Output filenames are configurable in <out>/ccxlog.config.json:
+  outputAllFileName         merged output (default: ccxlog.md)
+  claude.outputAllFileName  -cc output     (default: cclog.md)
+  codex.outputAllFileName   -cx output     (default: cxlog.md)
+
+The three aggregate outputs coexist in <out>; each mode only touches its own
+file. Progress rendering is controlled by the template (%Progress% /
+%ProgressFull%).`);
 }
 
 async function main(): Promise<void> {
