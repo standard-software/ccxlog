@@ -1,7 +1,7 @@
 {
   "private": false,
   "name": "@standard-software/ccxlog",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Discover and merge Claude Code and Codex CLI session logs (JSONL) into a single readable Markdown timeline.",
   "type": "module",
   "bin": {

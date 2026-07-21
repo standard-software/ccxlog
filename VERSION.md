@@ -2,6 +2,15 @@
 
 ## Version
 
+### 1.0.1
+#### 2026/07/22(Wed)
+- document the difference between
+  [`@standard-software/cclog`](https://www.npmjs.com/package/@standard-software/cclog),
+  which is dedicated to Claude Code, and ccxlog, which supports both Claude Code
+  and Codex CLI
+- document `-cc` / `-cx` dedicated output modes and link the
+  [GitHub repository](https://github.com/standard-software/ccxlog)
+
 ### 1.0.0
 #### 2026/07/22(Wed)
 - initial release

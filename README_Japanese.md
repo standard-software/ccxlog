@@ -19,6 +19,20 @@ Claude Code と Codex CLI のセッションログを、1つの読みやすい M
 出力）、`-cx` は Codex 専用エクスポータ（`cxlog.md` を出力）のように振る舞います。
 `ccxlog` はどちらも犠牲にせず両方を統合します。
 
+## ccxlog と cclog の違い
+
+[`@standard-software/cclog`](https://www.npmjs.com/package/@standard-software/cclog)
+は **Claude Code 専用**のログ出力ツールです。それに対して `ccxlog` は
+**Claude Code と Codex CLI の両方**に対応し、既定では両方のログを
+`ccxlog.md` に統合します。
+
+また、オプションを指定すれば、それぞれの専用ログとして出力できます。
+
+```bash
+ccxlog -cc      # Claude Code のみ -> CCXLOG/cclog.md
+ccxlog -cx      # Codex CLI のみ   -> CCXLOG/cxlog.md
+```
+
 ## インストール
 
 ```bash
@@ -27,7 +41,9 @@ npm install -g @standard-software/ccxlog
 
 npm 上では
 [`@standard-software/ccxlog`](https://www.npmjs.com/package/@standard-software/ccxlog)
-として公開されています。インストールされる CLI コマンドは単に `ccxlog` です。
+として公開されています。ソースコードは
+[`standard-software/ccxlog`](https://github.com/standard-software/ccxlog)
+で公開しています。インストールされる CLI コマンドは単に `ccxlog` です。
 
 ## 使い方
 

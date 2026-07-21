@@ -19,6 +19,19 @@ If you only want one tool, `-cc` behaves like a dedicated Claude-Code exporter
 (writing `cclog.md`) and `-cx` like a dedicated Codex exporter (writing
 `cxlog.md`) — `ccxlog` unifies both without giving up either.
 
+## ccxlog and cclog
+
+[`@standard-software/cclog`](https://www.npmjs.com/package/@standard-software/cclog)
+is dedicated to **Claude Code** logs. In contrast, `ccxlog` supports both
+**Claude Code and Codex CLI**, merging them into `ccxlog.md` by default.
+
+You can also use `ccxlog` as a dedicated exporter for either source:
+
+```bash
+ccxlog -cc      # Claude Code only -> CCXLOG/cclog.md
+ccxlog -cx      # Codex CLI only   -> CCXLOG/cxlog.md
+```
+
 ## Install
 
 ```bash
@@ -27,6 +40,8 @@ npm install -g @standard-software/ccxlog
 
 The package is published on npm as
 [`@standard-software/ccxlog`](https://www.npmjs.com/package/@standard-software/ccxlog).
+The source repository is
+[`standard-software/ccxlog`](https://github.com/standard-software/ccxlog).
 The installed CLI command is just `ccxlog`.
 
 ## Usage
