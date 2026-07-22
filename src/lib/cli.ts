@@ -13,7 +13,6 @@ export function parseArgs(argv: string[]): ParseResult {
   let outDir: string | null = null;
   let claudeOnly = false;
   let codexOnly = false;
-  let sourceOpt: string | undefined;
   let perSession = false;
   let dryRun = false;
   let verbose = false;
@@ -34,16 +33,9 @@ export function parseArgs(argv: string[]): ParseResult {
       const v = args[++i];
       if (!v || v.startsWith('-')) return { kind: 'error', msg: '--out requires a directory value' };
       outDir = v;
-    } else if (a === '--source') {
-      const v = args[++i];
-      if (!v || v.startsWith('-')) return { kind: 'error', msg: '--source requires a value (both|claude|codex)' };
-      if (v !== 'both' && v !== 'claude' && v !== 'codex') {
-        return { kind: 'error', msg: `Invalid --source value: ${v} (expected both|claude|codex)` };
-      }
-      sourceOpt = v;
-    } else if (a === '-cc' || a === '--claude-only') {
+    } else if (a === '-cc') {
       claudeOnly = true;
-    } else if (a === '-cx' || a === '--codex-only') {
+    } else if (a === '-cx') {
       codexOnly = true;
     } else if (a === '--per-session') {
       perSession = true;
@@ -82,11 +74,7 @@ export function parseArgs(argv: string[]): ParseResult {
   if (claudeOnly && codexOnly) {
     return { kind: 'error', msg: '-cc and -cx cannot be combined.' };
   }
-  const cliMode: SourceMode | undefined = claudeOnly ? 'claude' : codexOnly ? 'codex' : undefined;
-  if (cliMode && sourceOpt && cliMode !== sourceOpt) {
-    return { kind: 'error', msg: `Conflicting source selection: ${claudeOnly ? '-cc' : '-cx'} vs --source ${sourceOpt}.` };
-  }
-  const mode: SourceMode = (cliMode ?? (sourceOpt as SourceMode | undefined) ?? 'both');
+  const mode: SourceMode = claudeOnly ? 'claude' : codexOnly ? 'codex' : 'both';
 
   // Standalone-action exclusivity (§3.2).
   const standalone = [

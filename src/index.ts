@@ -344,7 +344,7 @@ async function writeAggregate(
 
   // Backup phase: take + verify the required backup before any write (§8.5).
   let backedUp = false;
-  if (!opts.dryRun && plan.destructive) {
+  if (!opts.dryRun && plan.backupRequired) {
     if (!(await backupAndVerify(plan.filePath, mdBackupDir))) {
       console.error(`Error: backup failed for ${plan.filePath}; not overwriting.`);
       return EXIT_RUNTIME;
@@ -368,7 +368,7 @@ async function writeAggregate(
   if (opts.verbose && possibleDuplicates > 0) {
     console.log(`Kept ${possibleDuplicates} possible duplicate pair(s) (same question key, not confirmed identical).`);
   }
-  if (backedUp || (opts.dryRun && plan.destructive)) console.log(`Backed up 1 pre-overwrite md file to ${mdBackupDir}`);
+  if (backedUp || (opts.dryRun && plan.backupRequired)) console.log(`Backed up 1 pre-overwrite md file to ${mdBackupDir}`);
   console.log(`Done. ${kept.length} pair(s) total [${commit.result}]${opts.dryRun ? ' (dry run)' : ''}.`);
   return EXIT_OK;
 }
@@ -431,12 +431,12 @@ async function writePerSession(
     if (await sessionDeletable(dc.filePath, dc.su)) deletes.push(dc);
   }
 
-  // Backup phase: destructive rewrites + deletions, all verified BEFORE any
+  // Backup phase: every rewrite + deletion, all verified BEFORE any
   // write or delete (§8.5 step 3). Any failure aborts the whole run.
   const backedUpSet = new Set<string>();
   if (!opts.dryRun) {
     for (const { plan } of plans) {
-      if (!plan.destructive) continue;
+      if (!plan.backupRequired) continue;
       if (!(await backupAndVerify(plan.filePath, mdBackupDir))) {
         console.error(`Error: backup failed for ${plan.filePath}; not writing anything.`);
         return EXIT_RUNTIME;
@@ -474,7 +474,7 @@ async function writePerSession(
       hadError = true;
       continue;
     }
-    if (backedUpSet.has(plan.filePath) || (opts.dryRun && plan.destructive)) backedUp++;
+    if (backedUpSet.has(plan.filePath) || (opts.dryRun && plan.backupRequired)) backedUp++;
     totalPairs += su.pairs.length;
     if (commit.result !== 'noop') updated.push(task.fileName);
     console.log(`[${su.adapter.id}:${idShort}] ${su.pairs.length} pair(s) [${commit.result}]${skipNote}`);
@@ -685,9 +685,8 @@ Arguments:
   project-path           Project directory (defaults to the current directory).
 
 Options:
-  -cc, --claude-only     Claude Code logs only (default output: cclog.md).
-  -cx, --codex-only      Codex logs only (default output: cxlog.md).
-  --source <s>           Explicit form of the above: both|claude|codex (default both).
+  -cc                    Claude Code logs only (default output: cclog.md).
+  -cx                    Codex logs only (default output: cxlog.md).
   --out <dir>            Output directory (default: <project-path>/CCXLOG).
   --per-session          Write one file per session (cclog_<id>.md / cxlog_<id>.md).
   --init-template        Copy the configured template into <out>/templates/ and

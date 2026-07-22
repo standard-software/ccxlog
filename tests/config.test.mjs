@@ -104,20 +104,22 @@ test('config: path-separator, trailing-dot and empty aggregate names are fatal',
 });
 
 test('config: boolean type mismatches warn and fall back to defaults', async () => {
-  await withConfig({ claude: { recursive: 'yes' }, codex: { includeDeveloperMessages: 1 } }, async (dir) => {
+  await withConfig({ claude: { includeSidechain: 'yes' }, codex: { includeDeveloperMessages: 1 } }, async (dir) => {
     const { config, warnings, errors } = await loadConfig(dir, dir);
     assert.equal(errors.length, 0, errors.join('; '));
-    assert.equal(config.claude.recursive, false);
+    assert.equal(config.claude.includeSidechain, false);
     assert.equal(config.codex.includeDeveloperMessages, false);
-    assert.ok(warnings.some(w => /claude\.recursive.*must be a boolean/i.test(w)));
+    assert.ok(warnings.some(w => /claude\.includeSidechain.*must be a boolean/i.test(w)));
     assert.ok(warnings.some(w => /codex\.includeDeveloperMessages.*must be a boolean/i.test(w)));
   });
 });
 
-test('config: unknown keys produce guidance warnings', async () => {
-  await withConfig({ recursive: true, sources: 'x', claude: { bogus: 1 } }, async (dir) => {
+test('config: removed recursive keys and unknown keys produce guidance warnings', async () => {
+  await withConfig({ recursive: true, sources: 'x', claude: { recursive: true, bogus: 1 }, codex: { recursive: false } }, async (dir) => {
     const { warnings } = await loadConfig(dir, dir);
-    assert.ok(warnings.some(w => /claude\.\*.*codex\.\*/.test(w)));       // top-level recursive
+    assert.ok(warnings.some(w => /recursion is selected automatically/.test(w)));
+    assert.ok(warnings.some(w => /claude\.recursive.*no longer supported.*non-recursive/i.test(w)));
+    assert.ok(warnings.some(w => /codex\.recursive.*no longer supported.*recursive/i.test(w)));
     assert.ok(warnings.some(w => /source is selected on the CLI/.test(w))); // sources
     assert.ok(warnings.some(w => /unknown "claude\.bogus"/.test(w)));
   });

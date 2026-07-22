@@ -56,13 +56,13 @@ export const claudeAdapter: SourceAdapter = {
       dir,
       origin: 'standard' as const,
       stableRootKey: 'std',
-      recursive: cfg.claude.recursive,
+      recursive: false,
     }));
     for (const spec of cfg.claude.extraLogDirs) {
       // Relative extraLogDirs resolve against <out>, not cwd (§4.2).
       const dir = path.resolve(outDir, spec.dir);
       const stableRootKey = spec.key ?? sha256HexBytes(canonicalPathString(dir), 12);
-      roots.push({ dir, origin: 'extra', stableRootKey, recursive: cfg.claude.recursive });
+      roots.push({ dir, origin: 'extra', stableRootKey, recursive: false });
     }
     return roots;
   },
@@ -77,7 +77,7 @@ export const claudeAdapter: SourceAdapter = {
   // become standard-origin RootRefs (stableRootKey 'std'), same as the exact
   // project roots — Claude's filterSession returns belongs:true, so their
   // sessions are kept verbatim.
-  async subdirRoots(projectPath: string, realProjectPath: string, cfg: CcxlogConfig): Promise<RootRef[]> {
+  async subdirRoots(projectPath: string, realProjectPath: string, _cfg: CcxlogConfig): Promise<RootRef[]> {
     const projectsDir = getClaudeProjectsDir();
     const bases = Array.from(new Set([projectPath, realProjectPath]));
     const exact = new Set(bases.map(b => encodeCwd(b)));
@@ -103,7 +103,7 @@ export const claudeAdapter: SourceAdapter = {
       if (!cwd) continue;
       const canonCwd = await canonicalPath(cwd);
       if (!canonBases.some(b => isPathWithin(canonCwd, b))) continue;   // sibling — reject
-      roots.push({ dir, origin: 'standard', stableRootKey: 'std', recursive: cfg.claude.recursive });
+      roots.push({ dir, origin: 'standard', stableRootKey: 'std', recursive: false });
     }
     return roots;
   },

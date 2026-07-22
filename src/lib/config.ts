@@ -28,14 +28,12 @@ export interface CcxlogConfig {
     outputAllFileName: string;
     outputSessionFilePrefix: string;
     extraLogDirs: RootSpec[];
-    recursive: boolean;
     includeSidechain: boolean;
   };
   codex: {
     outputAllFileName: string;
     outputSessionFilePrefix: string;
     extraLogDirs: RootSpec[];
-    recursive: boolean;
     includeDeveloperMessages: boolean;
   };
 }
@@ -52,14 +50,12 @@ export function defaultConfig(): CcxlogConfig {
       outputAllFileName: 'cclog.md',
       outputSessionFilePrefix: 'cclog_',
       extraLogDirs: [],
-      recursive: false,
       includeSidechain: false,
     },
     codex: {
       outputAllFileName: 'cxlog.md',
       outputSessionFilePrefix: 'cxlog_',
       extraLogDirs: [],
-      recursive: true,
       includeDeveloperMessages: false,
     },
   };
@@ -171,16 +167,18 @@ function asString(v: unknown, fallback: string, label: string, warnings: string[
 }
 
 const TOP_KEYS = new Set(['extraCwds', 'includeSubdirectories', 'outputAllFileName', 'template', 'claude', 'codex']);
-const CLAUDE_KEYS = new Set(['outputAllFileName', 'outputSessionFilePrefix', 'extraLogDirs', 'recursive', 'includeSidechain']);
-const CODEX_KEYS = new Set(['outputAllFileName', 'outputSessionFilePrefix', 'extraLogDirs', 'recursive', 'includeDeveloperMessages']);
+const CLAUDE_KEYS = new Set(['outputAllFileName', 'outputSessionFilePrefix', 'extraLogDirs', 'includeSidechain']);
+const CODEX_KEYS = new Set(['outputAllFileName', 'outputSessionFilePrefix', 'extraLogDirs', 'includeDeveloperMessages']);
 
 function checkUnknownKeys(obj: Record<string, unknown>, warnings: string[]): void {
   for (const key of Object.keys(obj)) {
     if (TOP_KEYS.has(key)) continue;
-    if (key === 'recursive' || key === 'includeSidechain' || key === 'includeDeveloperMessages') {
+    if (key === 'recursive') {
+      warnings.push('Warning: config key "recursive" is not supported; recursion is selected automatically for each source.');
+    } else if (key === 'includeSidechain' || key === 'includeDeveloperMessages') {
       warnings.push(`Warning: unknown top-level config key "${key}"; put it under "claude.*" or "codex.*".`);
     } else if (key === 'source' || key === 'sources') {
-      warnings.push(`Warning: config key "${key}" is not supported; the source is selected on the CLI (-cc/-cx/--source).`);
+      warnings.push(`Warning: config key "${key}" is not supported; the source is selected on the CLI (-cc/-cx).`);
     } else {
       warnings.push(`Warning: unknown top-level config key "${key}"; ignoring it.`);
     }
@@ -254,10 +252,14 @@ export async function loadConfig(
   const codex = (obj.codex && typeof obj.codex === 'object' && !Array.isArray(obj.codex))
     ? obj.codex as Record<string, unknown> : {};
   for (const key of Object.keys(claude)) {
-    if (!CLAUDE_KEYS.has(key)) warnings.push(`Warning: unknown "claude.${key}" config key; ignoring it.`);
+    if (key === 'recursive') {
+      warnings.push('Warning: config key "claude.recursive" is no longer supported; Claude Code log discovery is non-recursive.');
+    } else if (!CLAUDE_KEYS.has(key)) warnings.push(`Warning: unknown "claude.${key}" config key; ignoring it.`);
   }
   for (const key of Object.keys(codex)) {
-    if (!CODEX_KEYS.has(key)) warnings.push(`Warning: unknown "codex.${key}" config key; ignoring it.`);
+    if (key === 'recursive') {
+      warnings.push('Warning: config key "codex.recursive" is no longer supported; Codex log discovery is recursive.');
+    } else if (!CODEX_KEYS.has(key)) warnings.push(`Warning: unknown "codex.${key}" config key; ignoring it.`);
   }
 
   config.extraCwds = asStringArray(obj.extraCwds, 'extraCwds', warnings);
@@ -267,9 +269,7 @@ export async function loadConfig(
   config.codex.outputAllFileName = asString(codex.outputAllFileName, config.codex.outputAllFileName, 'codex.outputAllFileName', warnings);
   config.claude.outputSessionFilePrefix = asString(claude.outputSessionFilePrefix, config.claude.outputSessionFilePrefix, 'claude.outputSessionFilePrefix', warnings);
   config.codex.outputSessionFilePrefix = asString(codex.outputSessionFilePrefix, config.codex.outputSessionFilePrefix, 'codex.outputSessionFilePrefix', warnings);
-  config.claude.recursive = asBool(claude.recursive, config.claude.recursive, 'claude.recursive', warnings);
   config.claude.includeSidechain = asBool(claude.includeSidechain, config.claude.includeSidechain, 'claude.includeSidechain', warnings);
-  config.codex.recursive = asBool(codex.recursive, config.codex.recursive, 'codex.recursive', warnings);
   config.codex.includeDeveloperMessages = asBool(codex.includeDeveloperMessages, config.codex.includeDeveloperMessages, 'codex.includeDeveloperMessages', warnings);
   config.claude.extraLogDirs = asRootSpecArray(claude.extraLogDirs, 'claude.extraLogDirs', warnings);
   config.codex.extraLogDirs = asRootSpecArray(codex.extraLogDirs, 'codex.extraLogDirs', warnings);

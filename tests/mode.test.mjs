@@ -1,4 +1,4 @@
-// §2.1 mode targets: --source aliases, per-mode aggregate renaming, per-source
+// §2.1 mode targets: short source selectors, per-mode aggregate renaming, per-source
 // %Model%/%Tokens%. Ported from old-develop mode.test.mjs, adapted to the new
 // develop CLI (extraLogDirs-pinned discovery, cc5 message wording).
 import { test } from 'node:test';
@@ -24,17 +24,17 @@ function setup(t, extraConfig = {}) {
   return ws;
 }
 
-test('--source claude is equivalent to -cc', t => {
+test('-cc selects Claude Code logs', t => {
   const ws = setup(t);
-  const r = run([ws.project, '--out', ws.out, '--source', 'claude'], { home: ws.home });
+  const r = run([ws.project, '--out', ws.out, '-cc'], { home: ws.home });
   assert.equal(r.status, 0, r.stderr);
   assert.equal(exists(path.join(ws.out, 'cclog.md')), true);
   assert.equal(exists(path.join(ws.out, 'ccxlog.md')), false);
 });
 
-test('--source codex is equivalent to -cx', t => {
+test('-cx selects Codex logs', t => {
   const ws = setup(t);
-  const r = run([ws.project, '--out', ws.out, '--source', 'codex'], { home: ws.home });
+  const r = run([ws.project, '--out', ws.out, '-cx'], { home: ws.home });
   assert.equal(r.status, 0, r.stderr);
   assert.equal(exists(path.join(ws.out, 'cxlog.md')), true);
   assert.equal(exists(path.join(ws.out, 'ccxlog.md')), false);

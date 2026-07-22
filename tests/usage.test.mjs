@@ -32,24 +32,16 @@ test('--version / -v / -V print a version string and exit 0', () => {
   assert.match(r.stdout.trim(), /^\d+\.\d+\.\d+/);
 });
 
-test('-cc agreeing with --source claude is allowed (redundant, not a usage error)', () => {
-  const r = parse('some/project', '-cc', '--source', 'claude');
-  assert.equal(r.kind, 'ok');
-  assert.equal(r.opts.mode, 'claude');
-});
-
 test('-cc and -cx together is a usage error (not last-wins)', () => {
   assert.equal(parse('p', '-cc', '-cx').kind, 'error');
 });
 
-test('-cc conflicting with --source codex is a usage error', () => {
-  assert.equal(parse('p', '-cc', '--source', 'codex').kind, 'error');
-});
-
-test('--source with an invalid value is a usage error', () => {
-  const r = parse('p', '--source', 'gemini');
-  assert.equal(r.kind, 'error');
-  assert.match(r.msg, /Invalid --source value/);
+test('removed source-selection options are unknown', () => {
+  for (const option of ['--claude-only', '--codex-only', '--source']) {
+    const r = parse('p', option);
+    assert.equal(r.kind, 'error', option);
+    assert.match(r.msg, /Unknown option/, option);
+  }
 });
 
 test('single-char / bundled short flags are unknown options', () => {

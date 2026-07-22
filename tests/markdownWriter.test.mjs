@@ -27,9 +27,11 @@ test('smart-write: create then noop', async () => {
     const content = agg(block(A));
     let plan = (await planWrite(file, content, 'aggregate')).plan;
     assert.equal(plan.outcome, 'create');
+    assert.equal(plan.backupRequired, false);
     assert.equal((await commitPlan(plan, { dryRun: false, alreadyBackedUp: false })).result, 'create');
     plan = (await planWrite(file, content, 'aggregate')).plan;
     assert.equal(plan.outcome, 'noop');
+    assert.equal(plan.backupRequired, false);
   } finally { rmrf(dir); }
 });
 
@@ -41,40 +43,41 @@ test('smart-write: append when new content strictly extends old', async () => {
     const two = agg(block(A) + block(B));
     const plan = (await planWrite(file, two, 'aggregate')).plan;
     assert.equal(plan.outcome, 'append');
+    assert.equal(plan.backupRequired, false);
     assert.equal((await commitPlan(plan, { dryRun: false, alreadyBackedUp: false })).result, 'append');
     assert.equal(fs.readFileSync(file, 'utf-8'), two); // append reproduced full content
   } finally { rmrf(dir); }
 });
 
-test('smart-write: dropping a block id is a destructive rewrite', async () => {
+test('smart-write: dropping a block id requires a backup', async () => {
   const { dir, file } = tmpFile();
   try {
     await commitPlan((await planWrite(file, agg(block(A) + block(B)), 'aggregate')).plan, { dryRun: false, alreadyBackedUp: false });
     const plan = (await planWrite(file, agg(block(A)), 'aggregate')).plan;
     assert.equal(plan.outcome, 'rewrite');
-    assert.equal(plan.destructive, true);
+    assert.equal(plan.backupRequired, true);
   } finally { rmrf(dir); }
 });
 
-test('smart-write: template-only change keeps ids -> non-destructive rewrite', async () => {
+test('smart-write: template-only rewrite also requires a backup', async () => {
   const { dir, file } = tmpFile();
   try {
     await commitPlan((await planWrite(file, agg(block(A)), 'aggregate')).plan, { dryRun: false, alreadyBackedUp: false });
     const reworded = agg(`<!-- ccxlogid:${A} -->\n# 2026/05/27 Wed 11:03:49\nDIFFERENT body\n\n`);
     const plan = (await planWrite(file, reworded, 'aggregate')).plan;
     assert.equal(plan.outcome, 'rewrite');
-    assert.equal(plan.destructive, false); // id A still present
+    assert.equal(plan.backupRequired, true);
   } finally { rmrf(dir); }
 });
 
-test('migration from the removed marker format is a destructive rewrite', async () => {
+test('migration from the removed marker format requires a backup', async () => {
   const { dir, file } = tmpFile();
   try {
     const old = agg(`<!-- ccxlog-pair:ccxid:${A} -->\n# 2026/05/27 Wed 11:03:49\ncontent\n\n`);
     fs.writeFileSync(file, old, 'utf-8');
     const plan = (await planWrite(file, agg(block(A)), 'aggregate')).plan;
     assert.equal(plan.outcome, 'rewrite');
-    assert.equal(plan.destructive, true);
+    assert.equal(plan.backupRequired, true);
   } finally { rmrf(dir); }
 });
 

@@ -16,13 +16,13 @@ export const codexAdapter: SourceAdapter = {
       dir: getCodexSessionsDir(),
       origin: 'standard',
       stableRootKey: 'std',
-      recursive: cfg.codex.recursive,
+      recursive: true,
     }];
     for (const spec of cfg.codex.extraLogDirs) {
       // Relative extraLogDirs resolve against <out>, not cwd (§4.2).
       const dir = path.resolve(outDir, spec.dir);
       const stableRootKey = spec.key ?? sha256HexBytes(canonicalPathString(dir), 12);
-      roots.push({ dir, origin: 'extra', stableRootKey, recursive: cfg.codex.recursive });
+      roots.push({ dir, origin: 'extra', stableRootKey, recursive: true });
     }
     return roots;
   },

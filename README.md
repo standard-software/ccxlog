@@ -2,35 +2,30 @@
 
 **Language:** [Japanese/日本語](README_Japanese.md)
 
-Merge Claude Code and Codex CLI session logs into one readable Markdown timeline.
+ccxlog is a command-line tool that combines Claude Code and Codex CLI session
+logs into one readable Markdown timeline.
 
-`ccxlog` reads the JSONL session logs that **Claude Code** writes under
-`~/.claude/projects/<encoded project path>/` and the ones that **Codex CLI**
-writes under `~/.codex/sessions/`, then renders every Q&A pair from both — sorted
-into a single chronological timeline — as `ccxlog.md` (or one file per session)
-in your project. Each block is labelled with its source (`ClaudeCode` / `Codex`),
-so a project you drove with both tools reads as one history.
+When development of ccxlog began in 2026, code-generation AI—especially Claude
+Code and Codex—had become a major part of software development. Git can preserve
+the code produced by AI, but the development process itself—what you asked the
+AI to do and how it responded—is not left behind in an easily reviewable form.
 
-The output is regenerated on every run, but the file is only modified when its
-content would actually change — and when the new content is a strict append, only
-the tail is appended so editors don't reload from the top.
+ccxlog collects your project's conversations with Claude Code and Codex and
+records them chronologically in `CCXLOG/ccxlog.md`. Even when you use both tools,
+you can read their instructions and responses as one project history.
 
-If you only want one tool, `-cc` behaves like a dedicated Claude-Code exporter
-(writing `cclog.md`) and `-cx` like a dedicated Codex exporter (writing
-`cxlog.md`) — `ccxlog` unifies both without giving up either.
+We hope ccxlog helps you preserve your development history and improve your
+productivity.
 
 ## ccxlog and cclog
 
-[`@standard-software/cclog`](https://www.npmjs.com/package/@standard-software/cclog)
+Its predecessor,
+[`@standard-software/cclog`](https://www.npmjs.com/package/@standard-software/cclog),
 is dedicated to **Claude Code** logs. In contrast, `ccxlog` supports both
 **Claude Code and Codex CLI**, merging them into `ccxlog.md` by default.
 
-You can also use `ccxlog` as a dedicated exporter for either source:
-
-```bash
-ccxlog -cc      # Claude Code only -> CCXLOG/cclog.md
-ccxlog -cx      # Codex CLI only   -> CCXLOG/cxlog.md
-```
+The main features of `cclog` have been incorporated into `ccxlog`. Because
+`ccxlog` can also run in Claude Code-only mode, migrating from `cclog` is easy.
 
 ## Install
 
@@ -66,6 +61,16 @@ ccxlog -cx      # Codex only        -> CCXLOG/cxlog.md
 The three aggregate files (`ccxlog.md`, `cclog.md`, `cxlog.md`) coexist in the
 output directory; each mode only touches its own file.
 
+### Log locations and discovery
+
+Claude Code writes session logs under a directory that encodes the project's
+absolute path: `~/.claude/projects/<encoded project path>/`. Codex CLI stores
+session logs by date under `~/.codex/sessions/`.
+
+ccxlog discovers these JSONL files and reads the sessions that belong to the
+target project. To read logs from another location, use `claude.extraLogDirs` or
+`codex.extraLogDirs` in the configuration file.
+
 ### Options
 
 ```
@@ -75,9 +80,8 @@ Arguments:
   project-path           Project directory (defaults to the current directory).
 
 Options:
-  -cc, --claude-only     Claude Code logs only  -> CCXLOG/cclog.md
-  -cx, --codex-only      Codex logs only        -> CCXLOG/cxlog.md
-  --source <s>           Explicit form of the above: both|claude|codex (default both).
+  -cc                    Claude Code logs only  -> CCXLOG/cclog.md
+  -cx                    Codex logs only        -> CCXLOG/cxlog.md
   --out <dir>            Output directory (default: <project-path>/CCXLOG).
   --per-session          Write one file per session (cclog_<id>.md / cxlog_<id>.md)
                          instead of the aggregated file.
@@ -95,7 +99,7 @@ Options:
                          into <out>/backup_CCXLOG_md/<yyyy-mm-dd_hh-mm-ss>_<host>/
                          and exit WITHOUT regenerating anything. On-demand trigger
                          of the same backup ccxlog makes automatically before a
-                         destructive rewrite.
+                         full rewrite of an existing output file.
   --lock                 Opt-in exclusive lock on <out> for the run (guards against
                          two ccxlog runs writing the same output concurrently).
   --force-unlock         Remove a stale lock left by a crashed run (use with --lock).
@@ -104,6 +108,36 @@ Options:
   -v, -V, --version      Show version and exit.
   -h, --help             Show this help.
 ```
+
+### Manual and automatic output Markdown backups
+
+When ccxlog must update existing output Markdown by any method other than a
+strict append, it automatically backs up the file before rewriting it. Examples
+include changing the template, inserting a Q&A at an earlier point in the
+timeline, or removing an older Q&A after its source JSONL has expired.
+
+No backup is created for a first-time file, unchanged content, or a strict
+append that preserves all existing content.
+
+Automatic backups are stored in:
+
+```text
+CCXLOG/backup_CCXLOG_md/<yyyy-mm-dd_hh-mm-ss>_<hostname>/
+```
+
+The backup is created and verified before the rewrite. If verification fails,
+the original Markdown is not modified. This lets you recover content that had
+already been exported to `ccxlog.md` even after it disappears from the source
+JSONL logs.
+
+You can also create a backup manually at any time:
+
+```bash
+ccxlog --backup-md
+```
+
+`--backup-md` is a standalone backup action. It copies exported Markdown managed
+by ccxlog and exits without rediscovering logs or regenerating Markdown.
 
 ### Backing up the raw JSONL logs
 
@@ -117,14 +151,19 @@ logs before that happens:
 ccxlog --backup-jsonl
 ```
 
-This copies every discovered `.jsonl` into
-`CCXLOG/backup_jsonl/<yyyy-mm-dd_hh-mm-ss>_<hostname>/` (a new timestamped folder
-per run, with the machine name appended so backups stay attributable per PC).
-`--backup-jsonl` is a **standalone action**: it backs up only and exits, so it
-does **not** (re)write any Markdown — run `ccxlog` without the flag for that.
-Combine with `--dry-run` to preview the destination without copying, or
-`--verbose` to see each copied file. The `CCXLOG/` output directory (and thus
-`backup_jsonl/`) is typically git-ignored, so backups won't pollute your repo.
+The destination has this structure:
+
+```text
+CCXLOG/
+└─ backup_jsonl/
+   └─ <yyyy-mm-dd_hh-mm-ss>_<hostname>/
+      ├─ cc/   ← Claude Code JSONL
+      └─ cx/   ← Codex JSONL
+```
+
+`--backup-jsonl` is a **standalone action**: it backs up only and exits without
+(re)generating Markdown. Combine it with `--dry-run` to preview the destination
+or `--verbose` to see each copied file.
 
 ## Configuration
 
@@ -147,14 +186,12 @@ or `codex` namespace:
     "outputAllFileName": "cclog.md",
     "outputSessionFilePrefix": "cclog_",
     "extraLogDirs": [],
-    "recursive": false,
     "includeSidechain": false
   },
   "codex": {
     "outputAllFileName": "cxlog.md",
     "outputSessionFilePrefix": "cxlog_",
     "extraLogDirs": [],
-    "recursive": true,
     "includeDeveloperMessages": false
   }
 }
@@ -162,24 +199,6 @@ or `codex` namespace:
 
 Use backslash-escaped paths on Windows (`C:\\Users\\...`) and forward-slash paths
 on Ubuntu/macOS (`/home/you/...`).
-
-For example, all three aggregate output filenames can be changed independently:
-
-```json
-{
-  "outputAllFileName": "ALL_AI_LOG.md",
-  "claude": {
-    "outputAllFileName": "CLAUDE_LOG.md"
-  },
-  "codex": {
-    "outputAllFileName": "CODEX_LOG.md"
-  }
-}
-```
-
-With this configuration, `ccxlog` writes `ALL_AI_LOG.md`, `ccxlog -cc` writes
-`CLAUDE_LOG.md`, and `ccxlog -cx` writes `CODEX_LOG.md`. The three names must be
-different so that one mode cannot overwrite another mode's output.
 
 ### Top-level (both sources)
 
@@ -197,9 +216,12 @@ different so that one mode cannot overwrite another mode's output.
 | `outputAllFileName`       | Aggregate filename for `-cc` / `-cx` mode. Defaults `cclog.md` / `cxlog.md`. |
 | `outputSessionFilePrefix` | Prefix for per-session filenames (used with `--per-session`). Defaults `cclog_` / `cxlog_`, so files are `cclog_<id>.md` / `cxlog_<id>.md`. Empty string means no prefix. |
 | `extraLogDirs`            | Additional raw log directories to read verbatim (`~/.claude/projects/...` for claude, `~/.codex/sessions/...` for codex). Entries are read without the cwd filter. |
-| `recursive`               | If `true`, descend into subdirectories of each log dir. Default `false` for claude, `true` for codex (Codex nests session files by date). |
 | `includeSidechain`        | *(claude only)* If `true`, include subagent / sidechain pairs in the output. |
 | `includeDeveloperMessages`| *(codex only)* If `true`, include Codex developer/system messages in the output. |
+
+Log-directory recursion is selected automatically for each source and is not
+configurable: Claude Code roots are scanned at the top level, while Codex roots
+are scanned recursively because Codex stores sessions in date subdirectories.
 
 ### Templates
 
@@ -285,12 +307,23 @@ Sure, here's how...
 ----------------------------------------
 ```
 
-The `[ClaudeCode]` / `[Codex]` tag and the `Source=` line come from `%Source%`,
-so a merged timeline makes clear which tool each turn belongs to. The
+The `[ClaudeCode]` / `[Codex]` tag comes from `%Source%`, so a merged timeline
+makes clear which tool each turn belongs to. The
 `<!-- -->` around the answer keeps the assistant's own Markdown (headings,
 lists, code) from colliding with the template's structure, and as a side effect
 Markdown viewers collapse it so long replies don't dominate the preview. Remove
 it from your template if you'd rather see answers expanded by default.
+
+### File update behavior
+
+ccxlog modifies an output file only when the generated result has changed. When
+new Q&A content belongs strictly at the end of the existing timeline, it appends
+only the new content instead of rewriting the entire file.
+
+As a result, running ccxlog while `ccxlog.md` is open in an editor such as Visual
+Studio Code does not force a full-file reload that returns the view to the top.
+You can keep your reading position while the latest logs are appended. When
+nothing has changed, the file's modification time is preserved as well.
 
 ## Notes
 
@@ -306,17 +339,18 @@ it from your template if you'd rather see answers expanded by default.
   session ids are per-file positional, so Codex pairs are never merged this way.
   `--per-session` output is intentionally left un-deduplicated so each session
   file stays a complete transcript.
-- The output is fully regenerated on every run; if you delete a source log, the
-  corresponding pairs disappear from the output on the next run.
-- **Pre-overwrite backup of the Markdown.** When a run would rewrite an existing
-  output `.md` *destructively* — at least one block present in the old file is
-  missing from the new content — the existing file is first copied to
+- Output content is rebuilt from the source logs on every run. If you delete a
+  source log, the corresponding pairs disappear on the next run. The actual
+  file update is classified as a no-op, strict append, or full rewrite.
+- **Pre-overwrite backup of the Markdown.** Whenever a run must fully rewrite an
+  existing output `.md` instead of strictly appending to it, the existing file
+  is first copied to
   `CCXLOG/backup_CCXLOG_md/<yyyy-mm-dd_hh-mm-ss>_<hostname>/` so the previous
-  version is never lost. Backup folders accumulate and are never pruned. A plain
-  append, an unchanged run, a first-time create, or a rewrite that keeps every
-  block never produces a backup, so these folders only appear when content
-  actually disappeared. Before any destructive write the backup is taken **and
-  verified**; if it can't be verified, the overwrite is aborted.
+  version is never lost. This includes template changes, insertion of an earlier
+  Q&A block, and removal of old content. Backup folders accumulate and are never
+  pruned. A first-time create, an unchanged run, or a strict append produces no
+  backup. Before every rewrite the backup is taken **and verified**; if it cannot
+  be verified, the rewrite is aborted.
 
 ## License
 

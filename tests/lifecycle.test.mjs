@@ -1,5 +1,5 @@
-// §8.1 smart-write lifecycle: noop -> append, non-destructive vs destructive
-// rewrite (backup only when destructive), config gates. Ported from
+// §8.1 smart-write lifecycle: noop -> append -> rewrite
+// (every rewrite is backed up), config gates. Ported from
 // old-develop output.test.mjs, adapted to new-develop wording.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -37,7 +37,7 @@ test('second identical run is a noop and preserves mtime; a later pair appends',
   assert.ok(md.indexOf('first') < md.indexOf('second'));
 });
 
-test('inserting an earlier pair is a non-destructive rewrite with no backup', t => {
+test('inserting an earlier pair rewrites and backs up first', t => {
   const ws = ccOnly(t, []);
   writeJsonl(path.join(ws.ccLogs, 'b.jsonl'),
     claudeQA(ws.project, { uuid: 'b', ts: '2026-05-27T11:00:00.000Z', q: 'later' }));
@@ -47,10 +47,11 @@ test('inserting an earlier pair is a non-destructive rewrite with no backup', t 
     claudeQA(ws.project, { uuid: 'a', ts: '2026-05-27T10:00:00.000Z', q: 'earlier' }));
   const r = run([ws.project, '--out', ws.out, '-cc'], { home: ws.home });
   assert.match(r.stdout, /\[rewrite\]/);
-  assert.equal(exists(path.join(ws.out, 'backup_CCXLOG_md')), false);
+  assert.match(r.stdout, /Backed up 1 pre-overwrite md file/);
+  assert.equal(exists(path.join(ws.out, 'backup_CCXLOG_md')), true);
 });
 
-test('deleting a source log triggers a destructive rewrite backed up first', t => {
+test('deleting a source log triggers a rewrite backed up first', t => {
   const ws = ccOnly(t, []);
   writeJsonl(path.join(ws.ccLogs, 'a.jsonl'),
     claudeQA(ws.project, { uuid: 'a', ts: '2026-05-27T10:00:00.000Z', q: 'keep' }));
@@ -68,7 +69,7 @@ test('deleting a source log triggers a destructive rewrite backed up first', t =
   assert.doesNotMatch(md, /doomed/);
 });
 
-test('changing only the template (all ids kept) does NOT back up', t => {
+test('changing only the template rewrites and backs up first', t => {
   const ws = ccOnly(t, []);
   writeJsonl(path.join(ws.ccLogs, 'a.jsonl'), claudeQA(ws.project, { uuid: 'a', q: 'stable' }));
   assert.equal(run([ws.project, '--out', ws.out, '-cc'], { home: ws.home }).status, 0);
@@ -79,7 +80,8 @@ test('changing only the template (all ids kept) does NOT back up', t => {
   writeConfig(ws.out, { claude: { extraLogDirs: [ws.ccLogs] }, template: 'templates/alt.md' });
   const r = run([ws.project, '--out', ws.out, '-cc'], { home: ws.home });
   assert.match(r.stdout, /\[rewrite\]/);
-  assert.equal(exists(path.join(ws.out, 'backup_CCXLOG_md')), false);
+  assert.match(r.stdout, /Backed up 1 pre-overwrite md file/);
+  assert.equal(exists(path.join(ws.out, 'backup_CCXLOG_md')), true);
 });
 
 test('invalid config JSON is rejected (exit 1) and no default-named file is written', t => {

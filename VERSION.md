@@ -2,6 +2,19 @@
 
 ## Version
 
+### 1.2.0
+#### 2026/07/23(Thu)
+- simplify source selection to `-cc` and `-cx`; remove `--claude-only`,
+  `--codex-only`, and `--source`
+- back up existing output Markdown before every full rewrite while preserving
+  no-op and strict append-only updates; this includes template-only changes and
+  insertion of earlier Q&A blocks
+- remove the configurable `claude.recursive` / `codex.recursive` keys and select
+  the correct discovery behavior automatically for each source; legacy keys are
+  ignored with a warning
+- expand and align the English and Japanese documentation for log discovery,
+  backups, file-update behavior, and migration from cclog
+
 ### 1.1.0
 #### 2026/07/22(Wed)
 - replace the `%PairId%` / `ccxid:` identity format with the clearer

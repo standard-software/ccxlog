@@ -124,11 +124,11 @@ test('per-session: case-only filename collision is rejected on win32 (§4.4)', {
   } finally { rmrf(home); }
 });
 
-test('destructive rewrite backs up before overwriting', () => {
+test('rewrite backs up before overwriting', () => {
   const s = scaffold();
   try {
     runCli([s.project], { home: s.home });
-    // Remove the Codex log so a pair vanishes on the next run -> destructive.
+    // Remove the Codex log so a pair vanishes on the next run -> rewrite.
     rmrf(path.join(s.home, '.codex'));
     const r = runCli([s.project], { home: s.home });
     assert.equal(r.code, 0, r.stderr);
@@ -197,12 +197,14 @@ test('--dry-run writes nothing', () => {
   } finally { s.cleanup(); }
 });
 
-test('usage errors: -cc -cx and unknown flag exit code 2', () => {
+test('usage errors: conflicting, unknown, and removed flags exit code 2', () => {
   const s = scaffold({ claude: false, codex: false });
   try {
     assert.equal(runCli([s.project, '-cc', '-cx'], { home: s.home }).code, 2);
     assert.equal(runCli([s.project, '--frobnicate'], { home: s.home }).code, 2);
-    assert.equal(runCli([s.project, '-cc', '--source', 'codex'], { home: s.home }).code, 2);
+    for (const removed of ['--claude-only', '--codex-only', '--source']) {
+      assert.equal(runCli([s.project, removed], { home: s.home }).code, 2, removed);
+    }
   } finally { s.cleanup(); }
 });
 

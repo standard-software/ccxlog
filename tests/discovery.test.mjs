@@ -8,17 +8,40 @@ import {
   run, workspace, writeConfig, writeJsonl, read, encodeCwd, claudeQA, codexQA,
 } from './helpers.mjs';
 
+test('recursion is source-defined and legacy config values are ignored', t => {
+  const ws = workspace(t);
+  writeJsonl(path.join(ws.ccLogs, 'direct.jsonl'),
+    claudeQA(ws.project, { uuid: 'cc-direct', q: 'claude direct' }));
+  writeJsonl(path.join(ws.ccLogs, 'nested', 'ignored.jsonl'),
+    claudeQA(ws.project, { uuid: 'cc-nested', q: 'claude nested' }));
+  writeJsonl(path.join(ws.cxLogs, '2026', '07', '23', 'rollout.jsonl'),
+    codexQA(ws.project, { sessionId: 'cx-nested', q: 'codex nested' }));
+  writeConfig(ws.out, {
+    claude: { extraLogDirs: [ws.ccLogs], recursive: true },
+    codex: { extraLogDirs: [ws.cxLogs], recursive: false },
+  });
+
+  const r = run([ws.project, '--out', ws.out], { home: ws.home });
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stderr, /claude\.recursive.*no longer supported/i);
+  assert.match(r.stderr, /codex\.recursive.*no longer supported/i);
+  const md = read(path.join(ws.out, 'ccxlog.md'));
+  assert.match(md, /claude direct/);
+  assert.doesNotMatch(md, /claude nested/);
+  assert.match(md, /codex nested/);
+});
+
 test('templates/ and backup_* subdirectories are never ingested', t => {
   const ws = workspace(t);
   const logs = path.join(ws.root, 'logs');
-  writeJsonl(path.join(logs, 'keep', 'real.jsonl'), claudeQA(ws.project, { uuid: 'k', q: 'real question' }));
-  writeJsonl(path.join(logs, 'templates', 'decoy.jsonl'), claudeQA(ws.project, { uuid: 'd1', q: 'template decoy' }));
-  writeJsonl(path.join(logs, 'backup_jsonl', 'decoy.jsonl'), claudeQA(ws.project, { uuid: 'd2', q: 'backup decoy' }));
-  writeConfig(ws.out, { claude: { extraLogDirs: [logs], recursive: true } });
+  writeJsonl(path.join(logs, 'keep', 'real.jsonl'), codexQA(ws.project, { sessionId: 'k', q: 'real question' }));
+  writeJsonl(path.join(logs, 'templates', 'decoy.jsonl'), codexQA(ws.project, { sessionId: 'd1', q: 'template decoy' }));
+  writeJsonl(path.join(logs, 'backup_jsonl', 'decoy.jsonl'), codexQA(ws.project, { sessionId: 'd2', q: 'backup decoy' }));
+  writeConfig(ws.out, { codex: { extraLogDirs: [logs] } });
 
-  const r = run([ws.project, '--out', ws.out, '-cc'], { home: ws.home });
+  const r = run([ws.project, '--out', ws.out, '-cx'], { home: ws.home });
   assert.equal(r.status, 0, r.stderr);
-  const md = read(path.join(ws.out, 'cclog.md'));
+  const md = read(path.join(ws.out, 'cxlog.md'));
   assert.match(md, /real question/);
   assert.doesNotMatch(md, /template decoy/);
   assert.doesNotMatch(md, /backup decoy/);
@@ -28,13 +51,13 @@ test('the generated <out> is excluded from discovery (never re-ingested)', t => 
   const ws = workspace(t);
   // A decoy jsonl placed under <out> must not be discovered even if a root
   // encloses it.
-  writeJsonl(path.join(ws.out, 'sneaky.jsonl'), claudeQA(ws.project, { uuid: 's', q: 'sneaky decoy' }));
-  writeJsonl(path.join(ws.project, 'realdir', 'a.jsonl'), claudeQA(ws.project, { uuid: 'r', q: 'legit question' }));
-  writeConfig(ws.out, { claude: { extraLogDirs: [ws.project], recursive: true } });
+  writeJsonl(path.join(ws.out, 'sneaky.jsonl'), codexQA(ws.project, { sessionId: 's', q: 'sneaky decoy' }));
+  writeJsonl(path.join(ws.project, 'realdir', 'a.jsonl'), codexQA(ws.project, { sessionId: 'r', q: 'legit question' }));
+  writeConfig(ws.out, { codex: { extraLogDirs: [ws.project] } });
 
-  const r = run([ws.project, '--out', ws.out, '-cc'], { home: ws.home });
+  const r = run([ws.project, '--out', ws.out, '-cx'], { home: ws.home });
   assert.equal(r.status, 0, r.stderr);
-  const md = read(path.join(ws.out, 'cclog.md'));
+  const md = read(path.join(ws.out, 'cxlog.md'));
   assert.match(md, /legit question/);
   assert.doesNotMatch(md, /sneaky decoy/);
 });

@@ -20,7 +20,7 @@ import {
   extractTokenTotals,
   formatTokens,
 } from './metaExtractor.js';
-import { encodeSid64, chooseMethod, regionFromLine, isDestructive } from './identity.js';
+import { encodeSid64, chooseMethod, regionFromLine } from './identity.js';
 import { sha256Hex } from './pathUtils.js';
 import type {
   Pair, UserEntry, AssistantEntry, ContentBlock, Source, SourceLabel, SourceMode, UnifiedPair,
@@ -355,7 +355,7 @@ export interface WritePlan {
   kind: 'aggregate' | 'session';
   newContent: string;
   outcome: WriteResult;
-  destructive: boolean;                 // only meaningful for 'rewrite'
+  backupRequired: boolean;              // true for every rewrite of an existing file
   appendTail: string;                   // only meaningful for 'append'
   fingerprint: FileFingerprint | null;  // existing file at plan time (null if absent)
 }
@@ -392,7 +392,7 @@ export async function planWrite(
 ): Promise<PlanResult> {
   const ex = await readExisting(filePath);
   if (!ex) {
-    return { ok: true, plan: { filePath, kind, newContent, outcome: 'create', destructive: false, appendTail: '', fingerprint: null } };
+    return { ok: true, plan: { filePath, kind, newContent, outcome: 'create', backupRequired: false, appendTail: '', fingerprint: null } };
   }
   const ownership = kind === 'aggregate' ? checkAggregateOwnership(ex.content) : checkSessionOwnership(ex.content);
   if (ownership === 'unconfirmed') {
@@ -402,7 +402,7 @@ export async function planWrite(
         + `Move it aside or set a different output name.`,
     };
   }
-  const { method, oldFirstLine, newFirstLine } = chooseMethod(ex.content, newContent);
+  const { oldFirstLine, newFirstLine } = chooseMethod(ex.content, newContent);
   const oldRegion = regionFromLine(ex.content, oldFirstLine);
   const newRegion = regionFromLine(newContent, newFirstLine);
   const oldOwner = ownerMarkerLine(ex.content);
@@ -423,8 +423,8 @@ export async function planWrite(
   } else {
     outcome = 'rewrite';
   }
-  const destructive = outcome === 'rewrite' && isDestructive(ex.content, newContent, method);
-  return { ok: true, plan: { filePath, kind, newContent, outcome, destructive, appendTail, fingerprint: ex.fp } };
+  const backupRequired = outcome === 'rewrite';
+  return { ok: true, plan: { filePath, kind, newContent, outcome, backupRequired, appendTail, fingerprint: ex.fp } };
 }
 
 // Re-check against the plan-time fingerprint (§8.5 step 4). True = the file
@@ -467,7 +467,7 @@ export async function backupAndVerify(filePath: string, backupDir: string): Prom
 export interface CommitOptions {
   dryRun: boolean;
   alreadyBackedUp: boolean;   // this file's backup was taken+verified in the batch phase
-  backupDir?: string;         // for a just-in-time backup if a re-plan turns destructive
+  backupDir?: string;         // for a just-in-time backup if a re-plan becomes a rewrite
 }
 
 export interface CommitResult { result: WriteResult; error?: string; }
@@ -497,7 +497,7 @@ export async function commitPlan(plan: WritePlan, opts: CommitOptions): Promise<
   if (!re.ok) return { result: plan.outcome, error: re.error };
   const rp = re.plan;
   if (rp.outcome === 'noop') return { result: 'noop' };
-  if (rp.destructive && !opts.alreadyBackedUp && opts.backupDir) {
+  if (rp.backupRequired && !opts.alreadyBackedUp && opts.backupDir) {
     if (!(await backupAndVerify(rp.filePath, opts.backupDir))) {
       return { result: rp.outcome, error: `Backup failed for ${rp.filePath}; not overwriting.` };
     }
