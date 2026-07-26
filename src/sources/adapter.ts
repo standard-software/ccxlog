@@ -25,8 +25,8 @@ export interface SessionData {
   jsonlPath: string;                 // display (absolute path)
   sourceFileRelativeId: string;      // namespaced stable id (§5.5)
   fromExplicitRoot: boolean;         // discovered under an extraLogDirs root (§5.2 trust)
-  fileContentHash: string;           // whole-file SHA-256 (dedupe §6.3)
-  eventIdStreamHash: string[];       // stable event id stream (subsequence §6.3)
+  fileContentHash: () => Promise<string>;  // 全ファイル SHA-256（遅延・メモ化。§6.3 重複排除）
+  eventIdStream: string[];           // 安定イベントID列（生文字列。§6.3 サブシーケンス確認）
   allPairs: Pair[];
   skippedLines: number;
 }
@@ -54,6 +54,15 @@ export interface SourceAdapter {
   subdirRoots?(projectPath: string, realProjectPath: string, cfg: CcxlogConfig): Promise<RootRef[]>;
   outputAllFileName(cfg: CcxlogConfig): string;
   sessionFilePrefix(cfg: CcxlogConfig): string;
+  // 任意実装: 全セッションパース前の軽量な事前フィルタ。除外して良いのは
+  // 「対象プロジェクトに属し得ない」ファイルだけ（属否が不明なファイルは
+  // 残して通常解析へ回すこと）。返却順は発見順を保ち、下流の決定的な出力
+  // 順序を崩さないこと。
+  prefilterFiles?(
+    files: DiscoveredFile[],
+    cfg: CcxlogConfig,
+    ctx: FilterContext,
+  ): Promise<DiscoveredFile[]>;
   readSession(file: DiscoveredFile, cfg: CcxlogConfig): Promise<SessionData>;
   // Keep only the pairs that belong to the target project. Returns the kept
   // pairs plus whether the session belongs to the project at all (used so

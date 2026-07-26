@@ -20,7 +20,7 @@ import {
   extractTokenTotals,
   formatTokens,
 } from './metaExtractor.js';
-import { encodeSid64, chooseMethod, regionFromLine } from './identity.js';
+import { encodeSid64, chooseMethod, regionFromLine, isSafeAmendment } from './identity.js';
 import { sha256Hex } from './pathUtils.js';
 import type {
   Pair, UserEntry, AssistantEntry, ContentBlock, Source, SourceLabel, SourceMode, UnifiedPair,
@@ -151,8 +151,8 @@ export interface UnifyParams {
   sessionName: string;
   sourceFile: string;
   sourceFileRelativeId: string;
-  fileContentHash: string;
-  eventIdStreamHash: string[];
+  fileContentHash: () => Promise<string>;
+  eventIdStream: string[];
   questionOrdinal: number;
 }
 
@@ -186,8 +186,16 @@ export function toUnifiedPair(p: UnifyParams): UnifiedPair {
     questionTimestampRaw: raw,
     questionTimestampMs: Number.isNaN(ms) ? null : ms,
     question: buildQuestion(pair),
-    progressSummary: buildProgress(pair, false),
-    progressFull: buildProgress(pair, true),
+    // 遅延生成: テンプレートが %Progress%/%ProgressFull% を参照する時だけ
+    // 構築する（既定テンプレートはどちらも参照しない）。ペア毎にメモ化。
+    progressSummary: (() => {
+      let memo: string | null = null;
+      return () => (memo ??= buildProgress(pair, false));
+    })(),
+    progressFull: (() => {
+      let memo: string | null = null;
+      return () => (memo ??= buildProgress(pair, true));
+    })(),
     answer: buildAnswer(pair),
     model: extractModel(pair),
     version: extractVersion(pair),
@@ -196,7 +204,7 @@ export function toUnifiedPair(p: UnifyParams): UnifiedPair {
     tokens: extractTokenTotals(pair, p.source),
     ccxid: '',
     fileContentHash: p.fileContentHash,
-    eventIdStreamHash: p.eventIdStreamHash,
+    eventIdStream: p.eventIdStream,
     forkKeys,
   };
 }
@@ -210,8 +218,11 @@ export function formatPair(u: UnifiedPair, template: string): string {
     SessionId: u.sessionId,
     SessionName: u.sessionName,
     Question: u.question,
-    Progress: u.progressSummary,
-    ProgressFull: u.progressFull,
+    // テンプレートが実際に参照する時だけ Progress を構築する（'%Progress%' は
+    // '%ProgressFull%' の部分文字列ではない — 閉じ '%' が異なるため、この
+    // includes 判定で両者を正しく区別できる）。
+    Progress: template.includes('%Progress%') ? u.progressSummary() : '',
+    ProgressFull: template.includes('%ProgressFull%') ? u.progressFull() : '',
     Answer: u.answer,
     Model: u.model,
     Version: u.version,
@@ -330,7 +341,11 @@ async function atomicWrite(filePath: string, content: string): Promise<void> {
   throw lastErr;
 }
 
-export type WriteResult = 'create' | 'noop' | 'append' | 'rewrite';
+// 'amend' = full rewrite whose diff provably loses no old content (unfinished
+// tail pairs filled in + pure appends; see isSafeAmendment). Written like a
+// rewrite but WITHOUT a pre-overwrite backup, so live-session projects do not
+// accumulate one backup per run.
+export type WriteResult = 'create' | 'noop' | 'append' | 'amend' | 'rewrite';
 
 // ---- write planning + commit (§8.5) --------------------------------------
 // The write path is split into a PLAN phase (no FS mutation; records each
@@ -420,6 +435,8 @@ export async function planWrite(
   } else if (newRegion.startsWith(oldRegion)) {
     outcome = 'append';
     appendTail = newRegion.slice(oldRegion.length);
+  } else if (isSafeAmendment(oldRegion, newRegion)) {
+    outcome = 'amend';   // no old content lost -> rewrite without backup
   } else {
     outcome = 'rewrite';
   }
@@ -478,7 +495,7 @@ async function performWrite(plan: WritePlan): Promise<CommitResult> {
     await fs.appendFile(plan.filePath, plan.appendTail, 'utf-8');
     return { result: 'append' };
   }
-  await atomicWrite(plan.filePath, plan.newContent); // create | rewrite
+  await atomicWrite(plan.filePath, plan.newContent); // create | amend | rewrite
   return { result: plan.outcome };
 }
 

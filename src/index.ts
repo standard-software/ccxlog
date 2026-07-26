@@ -153,6 +153,7 @@ interface AdapterRun {
   adapter: SourceAdapter;
   roots: RootRef[];
   files: DiscoveredFile[];
+  filesRead: number;         // プリフィルタ通過後に全パースしたファイル数（--verbose 表示用）
   sessions: SessionData[];   // filtered (belongs); pairs may be empty
 }
 
@@ -210,7 +211,7 @@ async function run(opts: CliOptions): Promise<number> {
       }
     }
     checkRootNamespaces(roots, adapter.id, runErrors);
-    adapterRuns.push({ adapter, roots, files: [], sessions: [] });
+    adapterRuns.push({ adapter, roots, files: [], filesRead: 0, sessions: [] });
   }
   if (runErrors.length) {
     for (const e of runErrors) console.error(`Config error: ${e}`);
@@ -233,7 +234,13 @@ async function run(opts: CliOptions): Promise<number> {
   };
   for (const ar of adapterRuns) {
     const kept: SessionData[] = [];
-    for (const f of ar.files) {
+    // 事前フィルタ（現状 Codex のみ実装）: 属し得ないファイルを全パース前に
+    // 除外する。属否不明のファイルは残る（cwdScanner.ts のフォールバック設計）。
+    const filesToRead = ar.adapter.prefilterFiles
+      ? await ar.adapter.prefilterFiles(ar.files, config, filterCtx)
+      : ar.files;
+    ar.filesRead = filesToRead.length;
+    for (const f of filesToRead) {
       const s = await ar.adapter.readSession(f, config);
       const { pairs, belongs } = await ar.adapter.filterSession(s, config, filterCtx);
       if (pairs.length > 0) kept.push({ ...s, allPairs: pairs });
@@ -263,7 +270,7 @@ async function run(opts: CliOptions): Promise<number> {
         sourceFile: s.jsonlPath,
         sourceFileRelativeId: s.sourceFileRelativeId,
         fileContentHash: s.fileContentHash,
-        eventIdStreamHash: s.eventIdStreamHash,
+        eventIdStream: s.eventIdStream,
         questionOrdinal: i,
       }));
       sessionUnified.push({ session: s, adapter: ar.adapter, pairs: ups });
@@ -326,7 +333,7 @@ async function writeAggregate(
   // Two-stage dedupe (§6.3): first the conservative per-session logical dedupe
   // (snapshots / prefixes / identical whole files), then the cross-session pass
   // that drops resumed/forked verbatim copies of the same turn by message uuid.
-  const { kept: keptLogical, removed, possibleDuplicates } = dedupePairs(sorted);
+  const { kept: keptLogical, removed, possibleDuplicates } = await dedupePairs(sorted);
   const { kept, removed: removedForks } = dedupeForkedSessions(keptLogical);
 
   const labelsPresent: string[] = [];
@@ -566,7 +573,7 @@ function printVerbose(opts: CliOptions, config: CcxlogConfig, adapterRuns: Adapt
   for (const ar of adapterRuns) {
     console.log(`[${ar.adapter.id}] roots:`);
     for (const r of ar.roots) console.log(`  ${r.origin === 'extra' ? '*' : '+'} ${r.dir}`);
-    console.log(`[${ar.adapter.id}] files: ${ar.files.length}, sessions kept: ${ar.sessions.length}`);
+    console.log(`[${ar.adapter.id}] files: ${ar.files.length}, fully read: ${ar.filesRead}, sessions kept: ${ar.sessions.length}`);
   }
   void config;
 }

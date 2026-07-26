@@ -3,6 +3,7 @@ import type { CcxlogConfig } from '../../lib/config.js';
 import { getCodexSessionsDir, sha256HexBytes, canonicalPathString, canonicalPath, isPathWithin, buildRelativeId } from '../../lib/pathUtils.js';
 import { extractCwd } from '../../lib/metaExtractor.js';
 import type { SourceAdapter, RootRef, DiscoveredFile, SessionData, FilterContext } from '../adapter.js';
+import { prefilterCodexFiles } from './cwdScanner.js';
 import { readJsonl } from './jsonlReader.js';
 import { buildPairs, extractSessionName } from './pairBuilder.js';
 
@@ -29,6 +30,12 @@ export const codexAdapter: SourceAdapter = {
 
   outputAllFileName(cfg: CcxlogConfig): string { return cfg.codex.outputAllFileName; },
   sessionFilePrefix(cfg: CcxlogConfig): string { return cfg.codex.outputSessionFilePrefix; },
+  // 全パース前の cwd プリフィルタ（cwdScanner.ts 参照）。除外して良いのは
+  // 「確実にこのプロジェクトに属さない」ファイルだけで、cwd 不明・走査失敗は
+  // 通常解析へフォールバックする。
+  async prefilterFiles(files: DiscoveredFile[], _cfg: CcxlogConfig, ctx: FilterContext) {
+    return prefilterCodexFiles(files, ctx);
+  },
 
   async readSession(file: DiscoveredFile, cfg: CcxlogConfig): Promise<SessionData> {
     const r = await readJsonl(file.filePath, cfg.codex.includeDeveloperMessages);
@@ -42,7 +49,7 @@ export const codexAdapter: SourceAdapter = {
       sourceFileRelativeId: buildRelativeId('codex', file.root.origin, file.root.stableRootKey, file.root.dir, file.filePath),
       fromExplicitRoot: file.root.origin === 'extra',
       fileContentHash: r.fileContentHash,
-      eventIdStreamHash: r.eventIdStreamHash,
+      eventIdStream: r.eventIdStream,
       allPairs: buildPairs(r.entries),
       skippedLines: r.skippedLines,
     };

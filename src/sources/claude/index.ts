@@ -125,7 +125,7 @@ export const claudeAdapter: SourceAdapter = {
       sourceFileRelativeId: buildRelativeId('claude', file.root.origin, file.root.stableRootKey, file.root.dir, file.filePath),
       fromExplicitRoot: file.root.origin === 'extra',
       fileContentHash: r.fileContentHash,
-      eventIdStreamHash: r.eventIdStreamHash,
+      eventIdStream: r.eventIdStream,
       allPairs: pairs,
       skippedLines: r.skippedLines,
     };

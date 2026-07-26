@@ -168,3 +168,103 @@ export function isDestructive(oldContent: string, newContent: string, method: Bl
   }
   return false;
 }
+
+// ---- safe-amendment detection (backup-free rewrite) ------------------------
+// A rewrite is a "safe amendment" when it provably loses no information from
+// the old body. The common real-world case: the previous run rendered a pair
+// whose session was still answering (empty Answer, `Model=` / `Tokens=` not
+// yet known); the next run fills that same block in and appends new pairs.
+// That is not a strict tail-extension, so it used to be a full rewrite WITH a
+// pre-overwrite backup — piling up one backup per run on projects where some
+// session is always live. Detecting it lets planWrite skip the backup while
+// still backing up every rewrite that could actually lose or reorder content.
+//
+// Conditions (all block-level, template-agnostic):
+//   1. both regions parse into valid ccxlogid blocks (no malformed/dup ids);
+//   2. any content before the first marker is byte-identical;
+//   3. the old id sequence is a prefix of the new id sequence (nothing
+//      removed, inserted mid-sequence, or reordered — new blocks only append);
+//   4. each old block is either byte-identical to its counterpart, or its
+//      full text is a character-subsequence of the counterpart — i.e. the new
+//      block is the old block with pure INSERTIONS only (`Model= Version=...`
+//      -> `Model=claude-... Version=...`, `Tokens=` -> `Tokens=in 135, ...`,
+//      empty Answer body -> filled body). Any deleted or substituted
+//      character breaks the subsequence and the caller falls back to a
+//      backed-up rewrite, so nothing readable in the old file can be lost.
+
+interface IdBlockSplit {
+  preamble: string[];
+  blocks: { id: string; lines: string[] }[];
+}
+
+function splitIdBlocks(region: string): IdBlockSplit | null {
+  const lines = region.split('\n');
+  const preamble: string[] = [];
+  const blocks: { id: string; lines: string[] }[] = [];
+  const seen = new Set<string>();
+  let current: { id: string; lines: string[] } | null = null;
+  for (const line of lines) {
+    if (CCXLOG_ID_LOOSE_RE.test(line)) {
+      const m = CCXLOG_ID_MARKER_RE.exec(line);
+      if (!m) return null;               // malformed marker -> indeterminate
+      if (seen.has(m[1])) return null;   // duplicate id -> indeterminate
+      seen.add(m[1]);
+      current = { id: m[1], lines: [] };
+      blocks.push(current);
+      continue;
+    }
+    if (current) current.lines.push(line);
+    else preamble.push(line);
+  }
+  return { preamble, blocks };
+}
+
+// True when `oldText` is a character-subsequence of `newText`: the new text
+// can be produced from the old text by insertions only. Two-pointer greedy is
+// exact for the subsequence relation (no false negatives).
+function isCharSubsequence(oldText: string, newText: string): boolean {
+  if (oldText.length > newText.length) return false;
+  let j = 0;
+  for (let i = 0; i < oldText.length; i++) {
+    const ch = oldText[i];
+    j = newText.indexOf(ch, j);
+    if (j === -1) return false;
+    j++;
+  }
+  return true;
+}
+
+function sameLines(a: string[], b: string[]): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
+}
+
+// Trailing blank lines of a block are inter-block / end-of-file separators,
+// not content: the last block of a file ends at EOF while the same block
+// followed by an appended one ends right before the next marker line, so the
+// count of trailing blanks shifts without any information changing.
+function trimTrailingEmpty(lines: string[]): string[] {
+  let end = lines.length;
+  while (end > 0 && lines[end - 1] === '') end--;
+  return lines.slice(0, end);
+}
+
+export function isSafeAmendment(oldRegion: string, newRegion: string): boolean {
+  const ob = splitIdBlocks(oldRegion);
+  const nb = splitIdBlocks(newRegion);
+  if (!ob || !nb) return false;
+  if (ob.blocks.length === 0) return false;              // nothing identifiable
+  if (nb.blocks.length < ob.blocks.length) return false; // blocks were dropped
+  if (!sameLines(ob.preamble, nb.preamble)) return false;
+  for (let i = 0; i < ob.blocks.length; i++) {
+    if (ob.blocks[i].id !== nb.blocks[i].id) return false; // inserted/reordered
+  }
+  for (let i = 0; i < ob.blocks.length; i++) {
+    const o = trimTrailingEmpty(ob.blocks[i].lines);
+    const n = trimTrailingEmpty(nb.blocks[i].lines);
+    if (sameLines(o, n)) continue;
+    if (!isCharSubsequence(o.join('\n'), n.join('\n'))) return false;
+  }
+  return true;
+}

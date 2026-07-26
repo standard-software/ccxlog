@@ -149,7 +149,7 @@ test('buildAnswer: a progress-only (developer) entry is never promoted to %Answe
   const u = toUnifiedPair({
     pair, source: 'codex', sourceLabel: 'Codex', sessionId: 's', sessionName: '',
     sourceFile: '/x.jsonl', sourceFileRelativeId: 'codex/standard/std/x.jsonl',
-    fileContentHash: '', eventIdStreamHash: [], questionOrdinal: 0,
+    fileContentHash: async () => '', eventIdStream: [], questionOrdinal: 0,
   });
   assert.equal(u.answer, '', 'developer/progress-only text must not become the answer');
 });
@@ -241,10 +241,11 @@ test('progress: summary vs full render independently (thinking only in the full 
   const u = toUnifiedPair({
     pair, source: 'claude', sourceLabel: 'ClaudeCode', sessionId: 's', sessionName: '',
     sourceFile: '/x.jsonl', sourceFileRelativeId: 'claude/standard/std/x.jsonl',
-    fileContentHash: '', eventIdStreamHash: [], questionOrdinal: 0,
+    fileContentHash: async () => '', eventIdStream: [], questionOrdinal: 0,
   });
-  // Thinking is surfaced only in the full dump, never the summary.
-  assert.doesNotMatch(u.progressSummary, /Thinking|secret reasoning/);
-  assert.match(u.progressFull, /Thinking/);
-  assert.match(u.progressFull, /secret reasoning/);
+  // Thinking は full 側にだけ現れ、summary には決して現れない。
+  // （progressSummary/progressFull は遅延アクセサになった。）
+  assert.doesNotMatch(u.progressSummary(), /Thinking|secret reasoning/);
+  assert.match(u.progressFull(), /Thinking/);
+  assert.match(u.progressFull(), /secret reasoning/);
 });

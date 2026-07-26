@@ -24,10 +24,10 @@ function mkPair(o = {}) {
     questionTimestampRaw: raw,
     questionTimestampMs: Date.parse(raw),
     question: o.question ?? 'Question text',
-    progressSummary: '', progressFull: '',
+    progressSummary: () => '', progressFull: () => '',
     answer: o.answer ?? '',
     model: '', version: '', gitBranch: '', cwd: '', tokens: {},
-    ccxid: '', fileContentHash: '', eventIdStreamHash: [],
+    ccxid: '', fileContentHash: async () => '', eventIdStream: [],
   };
 }
 

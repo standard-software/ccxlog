@@ -18,13 +18,15 @@ function mkPair(o = {}) {
     questionTimestampRaw: raw,
     questionTimestampMs: Number.isNaN(ms) ? null : ms,
     question: o.question ?? 'Q',
-    progressSummary: '', progressFull: '',
+    progressSummary: () => '', progressFull: () => '',
     answer: o.answer ?? '',
     model: '', version: '', gitBranch: '', cwd: '',
     tokens: {},
     ccxid: '',
-    fileContentHash: o.fileContentHash ?? '',
-    eventIdStreamHash: o.eventIdStreamHash ?? [],
+    // fileContentHash は UnifiedPair 上で遅延・非同期アクセサになった。
+    // テストはオプションで素の文字列を渡し、ここでラップする。
+    fileContentHash: async () => o.fileContentHash ?? '',
+    eventIdStream: o.eventIdStreamHash ?? [],
   };
 }
 
@@ -55,46 +57,46 @@ test('comparator: total order is deterministic and reproducible', () => {
   assert.deepEqual(a, b);
 });
 
-test('dedupe: identical full-file copy is removed once', () => {
+test('dedupe: identical full-file copy is removed once', async () => {
   const p1 = mkPair({ sessionId: 's', question: 'Same', fileContentHash: 'HASH' });
   const p2 = mkPair({ sessionId: 's', question: 'Same', fileContentHash: 'HASH' });
-  const { kept, removed } = dedupePairs([p1, p2].sort(compareUnifiedPairs));
+  const { kept, removed } = await dedupePairs([p1, p2].sort(compareUnifiedPairs));
   assert.equal(removed, 1);
   assert.equal(kept.length, 1);
 });
 
-test('dedupe: cross-source same text is always kept (both)', () => {
+test('dedupe: cross-source same text is always kept (both)', async () => {
   const cc = mkPair({ source: 'claude', sessionId: 's', question: 'Same', fileContentHash: 'H' });
   const cx = mkPair({ source: 'codex', sessionId: 's', question: 'Same', fileContentHash: 'H' });
-  const { kept, removed } = dedupePairs([cc, cx].sort(compareUnifiedPairs));
+  const { kept, removed } = await dedupePairs([cc, cx].sort(compareUnifiedPairs));
   assert.equal(removed, 0);
   assert.equal(kept.length, 2);
 });
 
-test('dedupe: unconfirmed same text is kept (conservative)', () => {
+test('dedupe: unconfirmed same text is kept (conservative)', async () => {
   // Same question text but different session and no confirming evidence.
   const p1 = mkPair({ sessionId: 's1', question: 'Same' });
   const p2 = mkPair({ sessionId: 's2', question: 'Same' });
-  const { removed } = dedupePairs([p1, p2].sort(compareUnifiedPairs));
+  const { removed } = await dedupePairs([p1, p2].sort(compareUnifiedPairs));
   assert.equal(removed, 0);
 });
 
-test('dedupe: a same-key but unconfirmed pair is counted as a possible duplicate', () => {
+test('dedupe: a same-key but unconfirmed pair is counted as a possible duplicate', async () => {
   // Same source+session+timestamp+question (same candidate key) but no
   // confirmation (no uuid, no file hash, event streams are not prefixes) ->
   // both kept AND surfaced as a possible duplicate for --verbose (§6.3).
   const p1 = mkPair({ sessionId: 's', question: 'Same', eventIdStreamHash: ['a'] });
   const p2 = mkPair({ sessionId: 's', question: 'Same', eventIdStreamHash: ['b'] });
-  const { kept, removed, possibleDuplicates } = dedupePairs([p1, p2].sort(compareUnifiedPairs));
+  const { kept, removed, possibleDuplicates } = await dedupePairs([p1, p2].sort(compareUnifiedPairs));
   assert.equal(removed, 0);
   assert.equal(kept.length, 2);
   assert.equal(possibleDuplicates, 1);
 });
 
-test('dedupe: different-session same text is NOT a possible duplicate (different key)', () => {
+test('dedupe: different-session same text is NOT a possible duplicate (different key)', async () => {
   const p1 = mkPair({ sessionId: 's1', question: 'Same' });
   const p2 = mkPair({ sessionId: 's2', question: 'Same' });
-  const { possibleDuplicates } = dedupePairs([p1, p2].sort(compareUnifiedPairs));
+  const { possibleDuplicates } = await dedupePairs([p1, p2].sort(compareUnifiedPairs));
   assert.equal(possibleDuplicates, 0);
 });
 
@@ -107,7 +109,7 @@ test('comparator: a missing questionEventUuid sorts before a present one (key 6)
   assert.ok(compareUnifiedPairs(withUuid, noUuid) > 0);
 });
 
-test('CC#3: the NUL candidate-key boundary keeps two distinct same-file pairs from merging', () => {
+test('CC#3: the NUL candidate-key boundary keeps two distinct same-file pairs from merging', async () => {
   // Two DIFFERENT logical pairs whose candidate-key material would be byte-
   // identical if the fields were joined with a SPACE:
   //   p1: session="s x", timestampRaw="2026"    -> "claude s x 2026 q"
@@ -117,16 +119,16 @@ test('CC#3: the NUL candidate-key boundary keeps two distinct same-file pairs fr
   // (\0) separator can never be forged by the embedded space, so both survive.
   const p1 = mkPair({ sessionId: 's x', questionTimestampRaw: '2026', question: 'q', fileContentHash: 'SAME' });
   const p2 = mkPair({ sessionId: 's', questionTimestampRaw: 'x 2026', question: 'q', fileContentHash: 'SAME' });
-  const { kept, removed } = dedupePairs([p1, p2].sort(compareUnifiedPairs));
+  const { kept, removed } = await dedupePairs([p1, p2].sort(compareUnifiedPairs));
   assert.equal(removed, 0, 'distinct pairs must not be merged by a forged boundary');
   assert.equal(kept.length, 2);
 });
 
-test('dedupe: answered copy supersedes the empty snapshot in place', () => {
+test('dedupe: answered copy supersedes the empty snapshot in place', async () => {
   // Older unanswered snapshot (strict-prefix event stream), then answered copy.
   const older = mkPair({ sessionId: 's', question: 'Q', answer: '', eventIdStreamHash: ['a', 'b'] });
   const newer = mkPair({ sessionId: 's', question: 'Q', answer: 'DONE', eventIdStreamHash: ['a', 'b', 'c'] });
-  const { kept, removed } = dedupePairs([older, newer].sort(compareUnifiedPairs));
+  const { kept, removed } = await dedupePairs([older, newer].sort(compareUnifiedPairs));
   assert.equal(removed, 1);
   assert.equal(kept.length, 1);
   assert.equal(kept[0].answer, 'DONE'); // richer answered copy won the slot

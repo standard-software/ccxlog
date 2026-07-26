@@ -54,26 +54,54 @@ function strictPrefix(a: string[], b: string[]): boolean {
   return true;
 }
 
-// Confirm p is a duplicate of an earlier q (§6.3). Only returns true when one
-// of the three confirmations holds; otherwise both are kept. `budget` caps the
-// (expensive) subsequence comparisons per candidate group.
-function confirmDuplicate(p: UnifiedPair, q: UnifiedPair, budget: { n: number }): boolean {
+// p が既出 q の重複と確認できるか（§6.3）。3つの確認のいずれかが成立した
+// ときだけ true。それ以外は両方残す。`budget` は候補グループ毎の
+// サブシーケンス比較回数の上限。
+//
+// 安価な順に並べ替えてある: uuid（メモリ内比較）→ prefix（メモリ内比較）→
+// 全ファイルハッシュ（遅延化されたため、初回はディスク読み＋ハッシュ計算が
+// 走る）。ハッシュを最後にすることで、uuid か prefix で決着する大多数の
+// ペアはディスクに触れない。
+// 注意: どれかが成立すれば重複、という OR 判定なので並び順で真偽は変わらない
+// が、prefix 確認が先に走ることで SUBSEQUENCE_LIMIT の予算消費パターンは
+// 旧実装（uuid → ハッシュ → prefix）と異なり得る（旧実装ならハッシュで即決
+// して予算を消費しなかったペアが、本実装では prefix 確認で予算を1つ消費する）。
+//
+// 差が出力に現れる条件（すべて同時に満たす必要がある）:
+//   (1) 同一候補キー（source＋session＋質問時刻＋質問文が完全一致）のグループ
+//       内で確認が SUBSEQUENCE_LIMIT（64）回を超えて行われ、かつ
+//   (2) 予算切れ後のペアに「uuid では確認できないがファイル全体ハッシュ一致
+//       では確認できた」ものが含まれる場合。
+// このとき旧実装なら削除された重複が本実装では両方残る（出力が増える方向のみ。
+// ペアが消える方向の差は起き得ない＝データを失わない側に倒れる）。実ログ・
+// 全テストでは差は観測されていない。
+//
+// 旧順序（ハッシュを prefix より先）に戻せば予算消費まで完全一致するが、
+// ハッシュは遅延化されたため、戻すと「prefix で決着するはずだった大多数の
+// 古いスナップショット重複」で毎回2ファイルの全読み＋ハッシュ計算が強制発火
+// し、遅延化の利得を打ち消す。安全性が keep-both 側に保たれていることを
+// 優先し、現順序を維持する（R2 レポート改善要求への回答。SPEEDUP-NOTES 参照）。
+async function confirmDuplicate(p: UnifiedPair, q: UnifiedPair, budget: { n: number }): Promise<boolean> {
   if (p.source !== q.source) return false;
-  // 1. same session + matching question event uuid.
+  // 1. 同一セッション ＋ 質問イベント uuid の一致。
   if (p.sessionId && p.sessionId === q.sessionId && p.questionEventUuid && p.questionEventUuid === q.questionEventUuid) {
     return true;
   }
-  // 2. identical whole-file content hash (a full copy).
-  if (p.fileContentHash && q.fileContentHash && p.fileContentHash === q.fileContentHash) {
-    return true;
-  }
-  // 3. same session and one event-id stream is a strict forward prefix of the
-  //    other (capped at SUBSEQUENCE_LIMIT comparisons per candidate group).
+  // 2. 同一セッションで、片方のイベントID列がもう片方の厳密な前方 prefix
+  //    （候補グループ毎に SUBSEQUENCE_LIMIT 回まで）。
   if (p.sessionId && p.sessionId === q.sessionId && budget.n < SUBSEQUENCE_LIMIT) {
     budget.n++;
-    if (strictPrefix(p.eventIdStreamHash, q.eventIdStreamHash) || strictPrefix(q.eventIdStreamHash, p.eventIdStreamHash)) {
+    if (strictPrefix(p.eventIdStream, q.eventIdStream) || strictPrefix(q.eventIdStream, p.eventIdStream)) {
       return true;
     }
+  }
+  // 3. 全ファイル内容ハッシュの一致（完全コピー）— 遅延ディスク読み＋ハッシュ。
+  //    '' は「確認できない」（読めない/解析後に変更された）を意味し、一致扱い
+  //    にはしない。
+  const ph = await p.fileContentHash();
+  if (ph) {
+    const qh = await q.fileContentHash();
+    if (qh && ph === qh) return true;
   }
   return false;
 }
@@ -129,7 +157,8 @@ export interface DedupeResult {
 // answered but the earlier kept copy is empty, the answered copy takes over the
 // earlier copy's OUTPUT POSITION (so the reader gets the complete block without
 // disturbing the deterministic order).
-export function dedupePairs(sorted: UnifiedPair[]): DedupeResult {
+// confirmDuplicate が遅延ハッシュ（非同期ディスク読み）を含むため async。
+export async function dedupePairs(sorted: UnifiedPair[]): Promise<DedupeResult> {
   const groups = new Map<string, { members: UnifiedPair[]; budget: { n: number } }>();
   const kept: UnifiedPair[] = [];
   let removed = 0;
@@ -144,7 +173,7 @@ export function dedupePairs(sorted: UnifiedPair[]): DedupeResult {
     }
     let dupOf = -1;
     for (let i = 0; i < group.members.length; i++) {
-      if (confirmDuplicate(p, group.members[i], group.budget)) { dupOf = i; break; }
+      if (await confirmDuplicate(p, group.members[i], group.budget)) { dupOf = i; break; }
     }
     if (dupOf >= 0) {
       removed++;

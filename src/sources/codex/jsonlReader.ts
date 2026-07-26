@@ -1,17 +1,35 @@
 import fs from 'node:fs/promises';
-import crypto from 'node:crypto';
 import { forEachLine } from '../../lib/lineStream.js';
+import { lazyFileSha256 } from '../../lib/pathUtils.js';
 import type { AssistantEntry, ContentBlock, LogEntry, UserEntry } from '../../lib/types.js';
 
 export interface CodexReadResult {
   entries: LogEntry[];
   skippedLines: number;
   fileSize: number;
-  fileContentHash: string;
-  eventIdStreamHash: string[];
+  fileContentHash: () => Promise<string>;   // 遅延・メモ化（§6.3 完全コピー確認用）
+  eventIdStream: string[];
   sessionId: string;
   sessionCwd: string;
   sessionName: string;
+}
+
+// Codex rollout の1レコードから cwd を取り出す。cwd を持ち得るのは
+// session_meta と turn_context の payload.cwd のみ、という形式知識は
+// この関数だけが持つ。通常リーダー（readJsonl）とプリフィルタ
+// （cwdScanner）の両方がこれを使うことで、将来 Codex のログ形式が
+// 変わった時に片方だけ更新されて正当なログが除外される事故を防ぐ
+// （R1 レポート指摘: 形式知識の二重化解消）。
+// recognized=false は「この関数が知らないレコード型」を意味し、プリフィルタ
+// 側では除外の根拠にせず通常解析へフォールバックする材料になる
+// （cwdScanner.ts の unknownFormat ガードを参照）。
+export function extractCodexCwdRecord(event: unknown): { recognized: boolean; cwd?: string } {
+  const e = raw(event);
+  if (e.type !== 'session_meta' && e.type !== 'turn_context') {
+    return { recognized: false };
+  }
+  const cwd = text(raw(e.payload).cwd);
+  return { recognized: true, ...(cwd !== '' ? { cwd } : {}) };
 }
 
 type Raw = Record<string, unknown>;
@@ -198,7 +216,7 @@ export async function readJsonl(filePath: string, includeDeveloperMessages = fal
     fallbackUsers = [];
   };
 
-  const fileContentHash = await forEachLine(filePath, (line) => {
+  await forEachLine(filePath, (line) => {
     if (!line.trim()) return;
     let event: Raw;
     try { event = JSON.parse(line) as Raw; } catch { skippedLines++; return; }
@@ -208,7 +226,8 @@ export async function readJsonl(filePath: string, includeDeveloperMessages = fal
     if (event.type === 'session_meta') {
       sessionId = text(payload.session_id) || text(payload.id) || sessionId;
       sessionName = text(payload.session_name) || text(payload.title) || sessionName;
-      sessionCwd = text(payload.cwd) || sessionCwd;
+      // cwd の抽出は共有関数（extractCodexCwdRecord）経由 — プリフィルタと同一知識。
+      sessionCwd = extractCodexCwdRecord(event).cwd || sessionCwd;
       cwd = sessionCwd;
       version = text(payload.cli_version) || version;
       gitBranch = text(raw(payload.git).branch) || gitBranch;
@@ -216,7 +235,7 @@ export async function readJsonl(filePath: string, includeDeveloperMessages = fal
     }
     if (event.type === 'turn_context') {
       turnId = text(payload.turn_id) || turnId;
-      cwd = text(payload.cwd) || cwd;
+      cwd = extractCodexCwdRecord(event).cwd || cwd;
       model = text(payload.model) || model;
       return;
     }
@@ -323,11 +342,20 @@ export async function readJsonl(filePath: string, includeDeveloperMessages = fal
   // question emitted, so flush any pending fallbacks now (§6.2).
   flushFallback();
 
-  const eventIdStreamHash = entries.map(e => {
+  // 生の "type id" 文字列列: strictPrefix() は要素等価比較なので、生文字列は
+  // 旧実装の要素毎 SHA-256 と全く同じ判別力を持つ。エントリ毎の暗号学的
+  // ハッシュ代を払わない。
+  const eventIdStream = entries.map(e => {
     const uuid = (e as { uuid?: unknown }).uuid;
     const id = typeof uuid === 'string' ? uuid : '';
-    return crypto.createHash('sha256').update(`${e.type} ${id}`).digest('hex').slice(0, 16);
+    return `${e.type} ${id}`;
   });
 
-  return { entries, skippedLines, fileSize: stat.size, fileContentHash, eventIdStreamHash, sessionId, sessionCwd, sessionName };
+  return {
+    entries, skippedLines, fileSize: stat.size,
+    fileContentHash: lazyFileSha256(filePath, {
+      size: stat.size, mtimeMs: stat.mtimeMs, dev: stat.dev, ino: stat.ino,
+    }),
+    eventIdStream, sessionId, sessionCwd, sessionName,
+  };
 }

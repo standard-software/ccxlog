@@ -2,6 +2,32 @@
 
 ## Version
 
+### 1.3.0
+#### 2026/07/27(Sun)
+- speed up log reading substantially (merged mode roughly 35-45% faster on
+  real data, and up to ~2.4x on large log sets); `-cc` now runs on par with
+  the original cclog
+- read JSONL logs in 8 MiB chunks with linear line splitting (was 64 KiB
+  chunks with per-line re-slicing)
+- compute whole-file duplicate-confirmation hashes lazily and asynchronously,
+  only when a duplicate candidate cannot be resolved by cheaper checks;
+  guard against files changed between parse and hash (size/mtime/dev/ino)
+- skip full parsing of Codex session files that verifiably belong to other
+  projects by pre-scanning their cwd records (e.g. 92 -> 9 fully parsed files
+  on real data); unknown record formats, files without cwd, scan I/O errors,
+  and files modified during the scan conservatively fall back to full parsing
+- build `%Progress%` / `%ProgressFull%` only when the template references
+  them
+- report `fully read` file counts for the Codex prefilter under `--verbose`
+- keep output byte-identical to 1.2.0 in all three modes (verified on frozen
+  real-data snapshots on Windows and WSL)
+- stop taking a pre-overwrite backup for rewrites that provably lose no
+  content (reported as `amend`): when the previous run rendered a pair whose
+  session was still answering, the next run fills it in and appends new
+  pairs; projects with always-live sessions no longer accumulate one backup
+  per run. Any rewrite that deletes, edits, or reorders existing content is
+  still backed up first.
+
 ### 1.2.0
 #### 2026/07/23(Thu)
 - simplify source selection to `-cc` and `-cx`; remove `--claude-only`,

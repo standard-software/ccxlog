@@ -78,8 +78,12 @@ export interface UnifiedPair {
   questionTimestampRaw: string;
   questionTimestampMs: number | null;
   question: string;
-  progressSummary: string;
-  progressFull: string;
+  // 遅延＋メモ化: Progress の生成は Q〜A 間の全ツール入出力を JSON 文字列化
+  // する重い処理で、既定テンプレート（%Progress% も %ProgressFull% も含まない）
+  // では捨てられるだけだった。formatPair() がテンプレートに実際に参照が
+  // ある時だけ呼び出す。
+  progressSummary: () => string;
+  progressFull: () => string;
   answer: string;
   model: string;
   version: string;
@@ -87,9 +91,14 @@ export interface UnifiedPair {
   cwd: string;
   tokens: TokenTotals;
   ccxid: string;                      // internal field, rendered as "ccxlogid:<hex24>"
-  // Internal (not rendered): carried from SessionData for logical dedupe (§6.3).
-  fileContentHash: string;
-  eventIdStreamHash: string[];
+  // 内部フィールド（出力されない）: SessionData から引き継ぐ論理重複排除用
+  // データ（§6.3）。fileContentHash は遅延＋メモ化の非同期アクセサで、§6.3 の
+  // 確認が実際に必要とした時だけファイルを読み直してハッシュする（ほぼ発火
+  // しない）。旧実装のように毎回全ログバイトをハッシュしない。eventIdStream は
+  // 生の "type\0id" 文字列列（strictPrefix は要素等価比較なので、旧実装の
+  // 要素毎 SHA-256 と判別力は同一。1行毎の暗号学的ハッシュ代を払わない）。
+  fileContentHash: () => Promise<string>;
+  eventIdStream: string[];
   // Internal (not rendered): globally-unique message uuids used to drop
   // resumed/forked copies of the same turn across DIFFERENT sessions (§6.3
   // cross-session dedupe). Populated for Claude only — Codex uuids are per-file

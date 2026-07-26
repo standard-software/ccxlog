@@ -18,13 +18,13 @@ function mkPair(o = {}) {
     questionTimestampRaw: raw,
     questionTimestampMs: Number.isNaN(ms) ? null : ms,
     question: o.question ?? 'Q',
-    progressSummary: '', progressFull: '',
+    progressSummary: () => '', progressFull: () => '',
     answer: o.answer ?? '',
     model: '', version: '', gitBranch: '', cwd: '',
     tokens: {},
     ccxid: '',
-    fileContentHash: o.fileContentHash ?? '',
-    eventIdStreamHash: o.eventIdStreamHash ?? [],
+    fileContentHash: async () => o.fileContentHash ?? '',
+    eventIdStream: o.eventIdStreamHash ?? [],
     forkKeys: o.forkKeys ?? [],
   };
 }
