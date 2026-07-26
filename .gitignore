@@ -43,3 +43,4 @@ Desktop.ini
 
 # Local AI tooling & skills — never part of the published CLI
 /.claude/
+/.agents/

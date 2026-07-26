@@ -20,7 +20,7 @@ import {
   extractTokenTotals,
   formatTokens,
 } from './metaExtractor.js';
-import { encodeSid64, chooseMethod, regionFromLine, isSafeAmendment } from './identity.js';
+import { encodeSid64, chooseMethod, regionFromLine, isDestructive } from './identity.js';
 import { sha256Hex } from './pathUtils.js';
 import type {
   Pair, UserEntry, AssistantEntry, ContentBlock, Source, SourceLabel, SourceMode, UnifiedPair,
@@ -341,11 +341,10 @@ async function atomicWrite(filePath: string, content: string): Promise<void> {
   throw lastErr;
 }
 
-// 'amend' = full rewrite whose diff provably loses no old content (unfinished
-// tail pairs filled in + pure appends; see isSafeAmendment). Written like a
-// rewrite but WITHOUT a pre-overwrite backup, so live-session projects do not
-// accumulate one backup per run.
-export type WriteResult = 'create' | 'noop' | 'append' | 'amend' | 'rewrite';
+// 自動バックアップ（backupRequired）は書き換え（rewrite）のうち「書き換え前に
+// 存在した ccxlogid が新内容から1つでも失われるもの」だけに付く（v1.4.0 R2、
+// isDestructive 参照）。判定不能時は安全側＝バックアップする。
+export type WriteResult = 'create' | 'noop' | 'append' | 'rewrite';
 
 // ---- write planning + commit (§8.5) --------------------------------------
 // The write path is split into a PLAN phase (no FS mutation; records each
@@ -370,7 +369,7 @@ export interface WritePlan {
   kind: 'aggregate' | 'session';
   newContent: string;
   outcome: WriteResult;
-  backupRequired: boolean;              // true for every rewrite of an existing file
+  backupRequired: boolean;              // rewrite のうち ccxlogid 消失（判定不能含む）時のみ true
   appendTail: string;                   // only meaningful for 'append'
   fingerprint: FileFingerprint | null;  // existing file at plan time (null if absent)
 }
@@ -417,7 +416,7 @@ export async function planWrite(
         + `Move it aside or set a different output name.`,
     };
   }
-  const { oldFirstLine, newFirstLine } = chooseMethod(ex.content, newContent);
+  const { method, oldFirstLine, newFirstLine } = chooseMethod(ex.content, newContent);
   const oldRegion = regionFromLine(ex.content, oldFirstLine);
   const newRegion = regionFromLine(newContent, newFirstLine);
   const oldOwner = ownerMarkerLine(ex.content);
@@ -435,12 +434,16 @@ export async function planWrite(
   } else if (newRegion.startsWith(oldRegion)) {
     outcome = 'append';
     appendTail = newRegion.slice(oldRegion.length);
-  } else if (isSafeAmendment(oldRegion, newRegion)) {
-    outcome = 'amend';   // no old content lost -> rewrite without backup
   } else {
     outcome = 'rewrite';
   }
-  const backupRequired = outcome === 'rewrite';
+  // 自動バックアップは「会話ペア消失事故を防ぐ最後の砦」（v1.4.0 R2）:
+  // 書き換えのうち、旧内容にあった ccxlogid が新内容から1つでも失われる
+  // 場合のみ発火する。本文差し替え・途中挿入・並び順変更・テンプレート
+  // 変更など ID が全て保たれる書き換えはバックアップしない。判定不能
+  // （旧に有効 ID なし／不正形式／重複／新側の解析失敗 = method 'none'）は
+  // isDestructive が true を返し、安全側＝バックアップする。
+  const backupRequired = outcome === 'rewrite' && isDestructive(ex.content, newContent, method);
   return { ok: true, plan: { filePath, kind, newContent, outcome, backupRequired, appendTail, fingerprint: ex.fp } };
 }
 
@@ -495,7 +498,7 @@ async function performWrite(plan: WritePlan): Promise<CommitResult> {
     await fs.appendFile(plan.filePath, plan.appendTail, 'utf-8');
     return { result: 'append' };
   }
-  await atomicWrite(plan.filePath, plan.newContent); // create | amend | rewrite
+  await atomicWrite(plan.filePath, plan.newContent); // create | rewrite
   return { result: plan.outcome };
 }
 

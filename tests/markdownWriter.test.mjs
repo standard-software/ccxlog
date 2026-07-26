@@ -59,14 +59,15 @@ test('smart-write: dropping a block id requires a backup', async () => {
   } finally { rmrf(dir); }
 });
 
-test('smart-write: template-only rewrite also requires a backup', async () => {
+test('smart-write: same-id reworded body is a rewrite WITHOUT a backup (v1.4.0 R2)', async () => {
   const { dir, file } = tmpFile();
   try {
     await commitPlan((await planWrite(file, agg(block(A)), 'aggregate')).plan, { dryRun: false, alreadyBackedUp: false });
     const reworded = agg(`<!-- ccxlogid:${A} -->\n# 2026/05/27 Wed 11:03:49\nDIFFERENT body\n\n`);
     const plan = (await planWrite(file, reworded, 'aggregate')).plan;
     assert.equal(plan.outcome, 'rewrite');
-    assert.equal(plan.backupRequired, true);
+    // ccxlogid が全て保たれる書き換えは自動バックアップの対象外。
+    assert.equal(plan.backupRequired, false);
   } finally { rmrf(dir); }
 });
 

@@ -438,8 +438,9 @@ async function writePerSession(
     if (await sessionDeletable(dc.filePath, dc.su)) deletes.push(dc);
   }
 
-  // Backup phase: every rewrite + deletion, all verified BEFORE any
-  // write or delete (§8.5 step 3). Any failure aborts the whole run.
+  // バックアップ段階: backupRequired な書き換え（ccxlogid 消失時のみ、v1.4.0
+  // R2）＋ファイル削除（ID 全消失に相当）を、書き込み・削除より前にすべて
+  // 取得・検証する（§8.5 step 3）。1つでも失敗したら実行全体を中止する。
   const backedUpSet = new Set<string>();
   if (!opts.dryRun) {
     for (const { plan } of plans) {

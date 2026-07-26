@@ -209,9 +209,16 @@ export function buildPairs(entries: LogEntry[], options: BuildPairsOptions = {})
           finalAssistantEntry: null,
         };
       } else if (e.parentUuid && e.parentUuid === current.questionEntry.parentUuid) {
-        // Cancellation + retype: sibling forks from the same parent.
-        current.questionEntry = e;
-        current.additionalQuestionEntries = [];
+        // キャンセル＋打ち直し（同じ parentUuid からの兄弟フォーク）: 置換せず、
+        // 打ち直し前の質問を「回答なしの独立ペア」として確定してから新ペアを
+        // 開始する（v1.4.0 R1）。A→B→C 連続キャンセルでも繰り返し成立する。
+        pairs.push(current);
+        current = {
+          questionEntry: e,
+          additionalQuestionEntries: [],
+          progressEntries: [],
+          finalAssistantEntry: null,
+        };
       } else {
         current.additionalQuestionEntries.push(e);
       }

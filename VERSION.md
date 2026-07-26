@@ -2,6 +2,39 @@
 
 ## Version
 
+### 1.4.0
+#### 2026/07/27(Mon)
+- keep Claude questions that were cancelled before any assistant output and
+  then retyped (the log records the retype as a sibling fork of the cancelled
+  question): the cancelled question is now emitted as its own answerless pair
+  instead of being silently replaced by the retyped one, and chains of
+  consecutive cancellations (A -> B -> C) keep every question. Real-data
+  measurement showed 2-5% of questions were disappearing this way, including
+  meaningful development instructions
+- unchanged around that fix: follow-up messages typed while a turn has not
+  answered yet are still merged into the same pair, a question is still
+  finalized by the next one once any assistant output exists, existing pairs
+  keep their `ccxlogid`s, and Codex output is unaffected (verified on frozen
+  real-data snapshots: the old id set is a subset of the new one, existing
+  blocks are byte-identical, only cancelled-question pairs are added)
+- redefine the automatic pre-overwrite Markdown backup as a last line of
+  defense against losing conversation pairs, not an archive of every past
+  Markdown: it now fires **only when at least one `ccxlogid` present in the
+  old file would be missing from the new content** (e.g. pairs vanishing
+  because their source JSONL expired, a discovery/config mistake, or a
+  de-duplication change)
+- still back up, on the safe side, when the comparison is indeterminate: no
+  valid `ccxlogid` in the old file, malformed or duplicate ids, or new
+  content that fails to parse; refusing to overwrite ownership-unconfirmed
+  files and the manual `--backup-md` / `--backup-jsonl` actions are unchanged
+- stop creating backups for rewrites that keep every id: answer updates of a
+  still-running turn, template changes, insertion of late-confirmed pairs at
+  an earlier point of the timeline, and reordering. The first regeneration
+  after upgrading only adds the previously-dropped cancelled questions, so it
+  creates no backup either
+- remove the v1.3.0 `amend` classification and its character-subsequence
+  checker, superseded by the simpler id-based rule (net code reduction)
+
 ### 1.3.0
 #### 2026/07/27(Sun)
 - speed up log reading substantially (merged mode roughly 35-45% faster on

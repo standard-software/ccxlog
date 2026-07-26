@@ -111,13 +111,18 @@ Options:
 
 ### Manual and automatic output Markdown backups
 
-When ccxlog must update existing output Markdown by any method other than a
-strict append, it automatically backs up the file before rewriting it. Examples
-include changing the template, inserting a Q&A at an earlier point in the
-timeline, or removing an older Q&A after its source JSONL has expired.
+The automatic backup is a last line of defense against losing conversation
+pairs. When ccxlog must rewrite existing output Markdown, it backs up the file
+first **only if at least one `ccxlogid` present in the old file would be
+missing from the new content** — for example when an older Q&A disappears
+because its source JSONL has expired. When the old file cannot be judged
+safely (no valid `ccxlogid`, malformed or duplicate ids, or the new content
+fails to parse), ccxlog also backs up, erring on the safe side.
 
-No backup is created for a first-time file, unchanged content, or a strict
-append that preserves all existing content.
+No backup is created for a first-time file, unchanged content, a strict
+append, or a rewrite that keeps every existing `ccxlogid` (answer updates,
+template changes, inserting a Q&A at an earlier point in the timeline,
+reordering, and so on).
 
 Automatic backups are stored in:
 
@@ -339,18 +344,27 @@ nothing has changed, the file's modification time is preserved as well.
   session ids are per-file positional, so Codex pairs are never merged this way.
   `--per-session` output is intentionally left un-deduplicated so each session
   file stays a complete transcript.
+- **Cancelled questions are kept.** If a Claude Code turn is interrupted
+  before any assistant output and the message is retyped, the cancelled
+  question is still emitted as its own pair with an empty Answer — including
+  chains of consecutive cancellations. Follow-up messages typed while a turn
+  has produced no answer yet keep being merged into the same pair as before.
+  (Since 1.4.0; previously the retyped message silently replaced the
+  cancelled question.)
 - Output content is rebuilt from the source logs on every run. If you delete a
   source log, the corresponding pairs disappear on the next run. The actual
   file update is classified as a no-op, strict append, or full rewrite.
-- **Pre-overwrite backup of the Markdown.** Whenever a run must fully rewrite an
-  existing output `.md` instead of strictly appending to it, the existing file
-  is first copied to
+- **Pre-overwrite backup of the Markdown.** Whenever a run must rewrite an
+  existing output `.md` in a way that would drop at least one `ccxlogid` the
+  file already contains (or the comparison cannot be made safely), the existing
+  file is first copied to
   `CCXLOG/backup_CCXLOG_md/<yyyy-mm-dd_hh-mm-ss>_<hostname>/` so the previous
-  version is never lost. This includes template changes, insertion of an earlier
-  Q&A block, and removal of old content. Backup folders accumulate and are never
-  pruned. A first-time create, an unchanged run, or a strict append produces no
-  backup. Before every rewrite the backup is taken **and verified**; if it cannot
-  be verified, the rewrite is aborted.
+  version is never lost. Backup folders accumulate and are never pruned. A
+  first-time create, an unchanged run, a strict append, or a rewrite that keeps
+  every existing `ccxlogid` (template changes, insertion of an earlier Q&A
+  block, answer updates) produces no backup. When a backup is required it is
+  taken **and verified** before the rewrite; if it cannot be verified, the
+  rewrite is aborted.
 
 ## License
 
