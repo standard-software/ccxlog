@@ -1,65 +1,56 @@
 # ccxlog
 
+**Language:** [Japanese/日本語](VERSION_Japanese.md)
+
 ## Version
+
+### 1.5.0
+#### 2026/07/29(Tue)
+- `claude.includeSidechain: true` now also discovers the subagent transcripts
+  newer Claude Code writes as separate `<session id>/subagents/*.jsonl` files
+  and renders them as additional sessions, closing the gap with cclog
+- remove the blanket discovery exclusions (`<out>` and folders named
+  `backup_jsonl` / `backup_CCXLOG_md` / `templates`): an explicit
+  `extraLogDirs` entry is read wherever it points, so snapshots under
+  `<out>/backup_jsonl` can be read back cclog-style
+- each source ingests only files in its own format — claude skips Codex
+  rollouts and vice versa, unrelated `.jsonl` is skipped by both — so a
+  mixed backup dir can be listed in both sources' `extraLogDirs`
+- `--backup-jsonl` preserves the root-relative structure (`cc/` mirrors the
+  live Claude layout including `subagents/`, which is always backed up;
+  `cx/` keeps the date tree), never re-copies files already under its own
+  destination, and snapshots read back exactly like the real log folders
+- automatic pre-overwrite backups moved to `backup_CCXLOG_md_auto/`,
+  separate from manual `--backup-md` copies — a pure pair-loss signal
 
 ### 1.4.0
 #### 2026/07/27(Mon)
 - keep Claude questions that were cancelled before any assistant output and
-  then retyped (the log records the retype as a sibling fork of the cancelled
-  question): the cancelled question is now emitted as its own answerless pair
-  instead of being silently replaced by the retyped one, and chains of
-  consecutive cancellations (A -> B -> C) keep every question. Real-data
-  measurement showed 2-5% of questions were disappearing this way, including
-  meaningful development instructions
-- unchanged around that fix: follow-up messages typed while a turn has not
-  answered yet are still merged into the same pair, a question is still
-  finalized by the next one once any assistant output exists, existing pairs
-  keep their `ccxlogid`s, and Codex output is unaffected (verified on frozen
-  real-data snapshots: the old id set is a subset of the new one, existing
-  blocks are byte-identical, only cancelled-question pairs are added)
-- redefine the automatic pre-overwrite Markdown backup as a last line of
-  defense against losing conversation pairs, not an archive of every past
-  Markdown: it now fires **only when at least one `ccxlogid` present in the
-  old file would be missing from the new content** (e.g. pairs vanishing
-  because their source JSONL expired, a discovery/config mistake, or a
-  de-duplication change)
-- still back up, on the safe side, when the comparison is indeterminate: no
-  valid `ccxlogid` in the old file, malformed or duplicate ids, or new
-  content that fails to parse; refusing to overwrite ownership-unconfirmed
-  files and the manual `--backup-md` / `--backup-jsonl` actions are unchanged
-- stop creating backups for rewrites that keep every id: answer updates of a
-  still-running turn, template changes, insertion of late-confirmed pairs at
-  an earlier point of the timeline, and reordering. The first regeneration
-  after upgrading only adds the previously-dropped cancelled questions, so it
-  creates no backup either
-- remove the v1.3.0 `amend` classification and its character-subsequence
-  checker, superseded by the simpler id-based rule (net code reduction)
+  then retyped: they are now emitted as answerless pairs instead of being
+  silently replaced (2-5% of real questions were disappearing this way).
+  Follow-up merging, pair finalization, existing `ccxlogid`s and Codex
+  output are all unchanged
+- the automatic pre-overwrite backup is now a last line of defense against
+  losing pairs: it fires only when a `ccxlogid` present in the old file
+  would be missing from the new content, or when the comparison is
+  indeterminate (safe side). Rewrites that keep every id — answer updates,
+  template changes, insertions, reordering — create no backup. Manual
+  `--backup-md` / `--backup-jsonl` are unchanged
+- remove the v1.3.0 `amend` machinery, superseded by the id-based rule
 
 ### 1.3.0
 #### 2026/07/27(Sun)
 - speed up log reading substantially (merged mode roughly 35-45% faster on
-  real data, and up to ~2.4x on large log sets); `-cc` now runs on par with
-  the original cclog
-- read JSONL logs in 8 MiB chunks with linear line splitting (was 64 KiB
-  chunks with per-line re-slicing)
-- compute whole-file duplicate-confirmation hashes lazily and asynchronously,
-  only when a duplicate candidate cannot be resolved by cheaper checks;
-  guard against files changed between parse and hash (size/mtime/dev/ino)
-- skip full parsing of Codex session files that verifiably belong to other
-  projects by pre-scanning their cwd records (e.g. 92 -> 9 fully parsed files
-  on real data); unknown record formats, files without cwd, scan I/O errors,
-  and files modified during the scan conservatively fall back to full parsing
-- build `%Progress%` / `%ProgressFull%` only when the template references
-  them
-- report `fully read` file counts for the Codex prefilter under `--verbose`
-- keep output byte-identical to 1.2.0 in all three modes (verified on frozen
-  real-data snapshots on Windows and WSL)
-- stop taking a pre-overwrite backup for rewrites that provably lose no
-  content (reported as `amend`): when the previous run rendered a pair whose
-  session was still answering, the next run fills it in and appends new
-  pairs; projects with always-live sessions no longer accumulate one backup
-  per run. Any rewrite that deletes, edits, or reorders existing content is
-  still backed up first.
+  real data, up to ~2.4x on large log sets; `-cc` on par with the original
+  cclog): 8 MiB chunked line reading, lazy async duplicate-confirmation
+  hashing with size/mtime/dev/ino guards, and lazy `%Progress%` rendering
+- pre-scan Codex cwd records to skip full parsing of sessions that belong
+  to other projects (e.g. 92 -> 9 fully parsed files on real data), with
+  conservative fallbacks for unknown formats, missing cwd, I/O errors and
+  mid-scan changes; `--verbose` reports `fully read` counts
+- output stays byte-identical to 1.2.0 in all three modes
+- skip the pre-overwrite backup for rewrites that provably lose no content
+  (`amend`), so always-live projects stop accumulating one backup per run
 
 ### 1.2.0
 #### 2026/07/23(Thu)

@@ -8,6 +8,10 @@ import type { Source } from './types.js';
 
 export const BACKUP_JSONL_DIR = 'backup_jsonl';
 export const BACKUP_MD_DIR = 'backup_CCXLOG_md';
+// 自動バックアップ（ID 消失を検知した書き換え直前の退避）の保存先は、手動
+// --backup-md と別のフォルダに分ける（v1.5.0）。「_auto に何か増えた＝ペアが
+// 消える変化があったシグナル」を手動バックアップの蓄積と混ぜないため。
+export const BACKUP_MD_AUTO_DIR = 'backup_CCXLOG_md_auto';
 
 export function backupHostName(): string {
   let raw = '';
@@ -26,10 +30,14 @@ export function backupFolderName(d: Date): string {
 export interface JsonlBackupItem {
   filePath: string;
   source: Source;
-  baseName: string;   // display name inside the backup
+  relPath: string;    // 探索ルートからの相対パス（バックアップ内で構造を保存する）
 }
 
-// Copy discovered source JSONL into backup_jsonl/<stamp>/<cc|cx>/ unchanged.
+// Copy discovered source JSONL into backup_jsonl/<stamp>/<cc|cx>/ unchanged,
+// preserving each file's root-relative path (v1.5.0):
+//   cc/<セッションID>.jsonl と cc/<セッションID>/subagents/agent-*.jsonl
+//   （ライブのログ配置のミラー。extraLogDirs に cc/ を指せばライブと同じ挙動）
+//   cx/<年>/<月>/<日>/rollout-*.jsonl（日付ツリーを保存。codex extra は再帰探索）
 // Returns count. Throws on the first copy failure after reporting.
 export async function backupJsonlFiles(
   items: JsonlBackupItem[],
@@ -42,20 +50,20 @@ export async function backupJsonlFiles(
   let copied = 0;
   for (const it of items) {
     const sub = it.source === 'claude' ? 'cc' : 'cx';
-    const destDir = path.join(root, sub);
-    await fs.mkdir(destDir, { recursive: true });
     if (!used.has(sub)) used.set(sub, new Set());
     const seen = used.get(sub)!;
-    let name = `${it.baseName}.jsonl`;
-    if (seen.has(name)) {
-      name = `${it.baseName}__${sha256HexBytes(it.filePath, 8)}.jsonl`;
+    // 別ルート由来で相対パスが衝突した場合はハッシュ付き名に退避（上書き防止）
+    let rel = it.relPath;
+    if (seen.has(rel)) {
+      rel = rel.replace(/\.jsonl$/, `__${sha256HexBytes(it.filePath, 8)}.jsonl`);
     }
-    seen.add(name);
-    const dest = path.join(destDir, name);
+    seen.add(rel);
+    const dest = path.join(root, sub, rel);
+    await fs.mkdir(path.dirname(dest), { recursive: true });
     if (await exists(dest)) { continue; } // never overwrite existing backup
     await fs.copyFile(it.filePath, dest);
     copied++;
-    if (verbose) console.log(`  backup: ${it.filePath} -> ${sub}/${name}`);
+    if (verbose) console.log(`  backup: ${it.filePath} -> ${sub}/${rel.replace(/\\/g, '/')}`);
   }
   return copied;
 }

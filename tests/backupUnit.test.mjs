@@ -23,8 +23,8 @@ test('CX#7: two files sharing a basename are both preserved (basename collision 
     fs.writeFileSync(b, 'BBB');
     const out = path.join(root, 'out');
     const copied = await backupJsonlFiles([
-      { filePath: a, source: 'claude', baseName: 'roll' },
-      { filePath: b, source: 'claude', baseName: 'roll' },
+      { filePath: a, source: 'claude', relPath: 'roll.jsonl' },
+      { filePath: b, source: 'claude', relPath: 'roll.jsonl' },
     ], out, FOLDER, false);
     assert.equal(copied, 2);
     const ccDir = path.join(out, BACKUP_JSONL_DIR, FOLDER, 'cc');
@@ -47,7 +47,7 @@ test('CC#8: an existing backup file is never overwritten (exclusive copy)', asyn
     fs.writeFileSync(path.join(ccDir, 'roll.jsonl'), 'PRIOR BACKUP');
 
     const copied = await backupJsonlFiles([
-      { filePath: src, source: 'claude', baseName: 'roll' },
+      { filePath: src, source: 'claude', relPath: 'roll.jsonl' },
     ], out, FOLDER, false);
     assert.equal(copied, 0, 'nothing copied over an existing backup');
     assert.equal(fs.readFileSync(path.join(ccDir, 'roll.jsonl'), 'utf-8'), 'PRIOR BACKUP',

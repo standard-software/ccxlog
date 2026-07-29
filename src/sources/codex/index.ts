@@ -52,6 +52,7 @@ export const codexAdapter: SourceAdapter = {
       eventIdStream: r.eventIdStream,
       allPairs: buildPairs(r.entries),
       skippedLines: r.skippedLines,
+      formatRecognized: r.formatRecognized,
     };
   },
 

@@ -25,6 +25,7 @@ import {
   listExportedMdFiles,
   backupMdFiles,
   parseSessionMarker,
+  BACKUP_MD_AUTO_DIR,
   type JsonlBackupItem,
 } from './lib/backup.js';
 import { acquireLock, releaseLock, type LockHandle } from './lib/lock.js';
@@ -45,7 +46,13 @@ function adaptersForMode(mode: SourceMode): SourceAdapter[] {
   return [claudeAdapter, codexAdapter];
 }
 
-const EXCLUDED_DIR_NAMES = new Set(['backup_jsonl', 'backup_CCXLOG_md', 'templates']);
+// v1.5.0: かつてここに「outDir 配下と backup_jsonl / backup_CCXLOG_md / templates
+// という名前のディレクトリを探索から除外する」保護があったが、撤廃した。
+// 根拠: (1) .md 系ディレクトリに .jsonl は存在せず除外は無意味 (2) 標準探索の
+// ルート（~/.claude / ~/.codex）配下にバックアップは現れない (3) extraLogDirs は
+// ユーザーの明示指定＝そこを読むのが意図どおり。実害だった「--backup-jsonl の
+// 自己増殖」は、探索側ではなくバックアップのコピー元選定で自分のコピー先を
+// 除外することで防ぐ（backupJsonl() を参照）。
 
 // Transient OS errors that a retry can clear. Under load (many concurrent runs,
 // antivirus scans, FD exhaustion) readdir/stat can briefly fail with these even
@@ -82,7 +89,6 @@ async function fsRetry<T>(op: () => Promise<T>): Promise<T> {
 async function walkJsonl(
   dir: string,
   recursive: boolean,
-  outDir: string,
   visited: Set<string>,
 ): Promise<string[]> {
   let entries: Array<{ name: string; isDirectory(): boolean; isFile(): boolean }>;
@@ -100,15 +106,13 @@ async function walkJsonl(
   const results: string[] = [];
   for (const e of entries) {
     const full = path.join(dir, e.name);
-    if (isPathWithin(full, outDir) || full === outDir) continue;
     if (e.isDirectory()) {
       if (!recursive) continue;
-      if (EXCLUDED_DIR_NAMES.has(e.name)) continue;
       const id = await fileIdentity(full);
       const key = id ? id.key : full;
       if (visited.has(key)) continue;
       visited.add(key);
-      results.push(...await walkJsonl(full, recursive, outDir, visited));
+      results.push(...await walkJsonl(full, recursive, visited));
     } else if (e.isFile() && e.name.endsWith('.jsonl')) {
       results.push(full);
     }
@@ -116,7 +120,40 @@ async function walkJsonl(
   return results;
 }
 
-async function discoverFiles(roots: RootRef[], outDir: string): Promise<DiscoveredFile[]> {
+// サブエージェント記録の探索（§ includeSidechain・v1.5.0）。新しめの Claude Code は
+// サブエージェントの会話を本体セッションファイル内の isSidechain エントリではなく
+// `<ルート>/<セッションID>/subagents/*.jsonl` という別ファイルに保存する。
+// includeSidechain 有効時のみ、各ルート直下のディレクトリについて subagents/ の
+// 直下だけを追加で読む（それ以深への再帰はしない。cclog と同じ到達範囲）。
+async function listSubagentJsonl(rootDir: string): Promise<string[]> {
+  let entries: Array<{ name: string; isDirectory(): boolean; isFile(): boolean }>;
+  try {
+    entries = await fsRetry(() => fs.readdir(rootDir, { withFileTypes: true }));
+  } catch {
+    return [];
+  }
+  const found: string[] = [];
+  for (const e of entries) {
+    if (!e.isDirectory()) continue;
+    const sub = path.join(rootDir, e.name, 'subagents');
+    let subEntries: Array<{ name: string; isFile(): boolean }>;
+    try {
+      subEntries = await fsRetry(() => fs.readdir(sub, { withFileTypes: true }));
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException)?.code;
+      if (code !== 'ENOENT' && code !== 'ENOTDIR') {
+        console.warn(`Warning: could not read directory ${sub} (${code ?? 'unknown error'}); skipping it.`);
+      }
+      continue;
+    }
+    for (const s of subEntries) {
+      if (s.isFile() && s.name.endsWith('.jsonl')) found.push(path.join(sub, s.name));
+    }
+  }
+  return found;
+}
+
+async function discoverFiles(roots: RootRef[]): Promise<DiscoveredFile[]> {
   const seenPhysical = new Set<string>();
   const out: DiscoveredFile[] = [];
   for (const root of roots) {
@@ -124,7 +161,10 @@ async function discoverFiles(roots: RootRef[], outDir: string): Promise<Discover
     try { st = await fsRetry(() => fs.stat(root.dir)); } catch { continue; }
     if (!st.isDirectory()) continue;
     const visited = new Set<string>();
-    const files = (await walkJsonl(root.dir, root.recursive, outDir, visited)).sort();
+    const files = (await walkJsonl(root.dir, root.recursive, visited)).sort();
+    if (root.scanSubagentDirs) {
+      files.push(...(await listSubagentJsonl(root.dir)).sort());
+    }
     for (const f of files) {
       const id = await fileIdentity(f);
       const key = id ? id.key : f;
@@ -154,6 +194,7 @@ interface AdapterRun {
   roots: RootRef[];
   files: DiscoveredFile[];
   filesRead: number;         // プリフィルタ通過後に全パースしたファイル数（--verbose 表示用）
+  formatSkipped: string[];   // 自ソース形式でないため除外した jsonl（--verbose 表示用）
   sessions: SessionData[];   // filtered (belongs); pairs may be empty
 }
 
@@ -211,7 +252,7 @@ async function run(opts: CliOptions): Promise<number> {
       }
     }
     checkRootNamespaces(roots, adapter.id, runErrors);
-    adapterRuns.push({ adapter, roots, files: [], filesRead: 0, sessions: [] });
+    adapterRuns.push({ adapter, roots, files: [], filesRead: 0, formatSkipped: [], sessions: [] });
   }
   if (runErrors.length) {
     for (const e of runErrors) console.error(`Config error: ${e}`);
@@ -220,7 +261,7 @@ async function run(opts: CliOptions): Promise<number> {
 
   // Discovery.
   for (const ar of adapterRuns) {
-    ar.files = await discoverFiles(ar.roots, opts.outDir);
+    ar.files = await discoverFiles(ar.roots);
   }
 
   // Read + filter sessions.
@@ -242,6 +283,9 @@ async function run(opts: CliOptions): Promise<number> {
     ar.filesRead = filesToRead.length;
     for (const f of filesToRead) {
       const s = await ar.adapter.readSession(f, config);
+      // 自ソース形式のレコードを1つも含まないファイル（他ソースのログ・
+      // 無関係の jsonl）はソース不一致として除外する（§形式判定・v1.5.0）。
+      if (!s.formatRecognized) { ar.formatSkipped.push(f.filePath); continue; }
       const { pairs, belongs } = await ar.adapter.filterSession(s, config, filterCtx);
       if (pairs.length > 0) kept.push({ ...s, allPairs: pairs });
       else if (belongs) kept.push({ ...s, allPairs: [] });
@@ -303,7 +347,7 @@ async function run(opts: CliOptions): Promise<number> {
   }
 
   if (!opts.dryRun) await fs.mkdir(opts.outDir, { recursive: true });
-  const mdBackupDir = path.join(opts.outDir, 'backup_CCXLOG_md', backupFolderName(new Date()));
+  const mdBackupDir = path.join(opts.outDir, BACKUP_MD_AUTO_DIR, backupFolderName(new Date()));
 
   // Optional lock (§8.6).
   let lock: LockHandle | undefined;
@@ -533,17 +577,37 @@ async function sessionDeletable(filePath: string, su: SessionUnified): Promise<b
 
 async function backupJsonl(opts: CliOptions, adapterRuns: AdapterRun[]): Promise<number> {
   const items: JsonlBackupItem[] = [];
+  // 自己増殖防止（v1.5.0）: extraLogDirs がコピー先（<out>/backup_jsonl）を含む
+  // 場所を指していても、既にコピー先配下にあるファイルはコピー元にしない。
+  // 読み込み（Markdown 出力）には影響せず、バックアップのたびに過去の
+  // バックアップまで複製されて膨らむことだけを防ぐ。
+  const backupRoot = path.join(opts.outDir, 'backup_jsonl');
   for (const ar of adapterRuns) {
-    // Claude: every discovered file belongs. Codex: only sessions that belong
-    // (filterSession already kept only belonging sessions).
+    // Both sources back up only files that were recognized as their own format
+    // and accepted by filterSession.  In particular, a mixed extraLogDirs root
+    // must not copy Codex/junk JSONL into cc/ (or Claude/junk JSONL into cx/).
     const belongingPaths = new Set(ar.sessions.map(s => s.jsonlPath));
+    const added = new Set<string>();
     for (const f of ar.files) {
-      if (ar.adapter.id === 'codex' && !belongingPaths.has(f.filePath)) continue;
+      if (!belongingPaths.has(f.filePath)) continue;
+      if (isPathWithin(f.filePath, backupRoot)) continue;
+      added.add(f.filePath);
       items.push({
         filePath: f.filePath,
         source: ar.adapter.id,
-        baseName: path.basename(f.filePath).replace(/\.jsonl$/, ''),
+        relPath: path.relative(f.root.dir, f.filePath),
       });
+    }
+    // Claude のサブエージェント記録は includeSidechain の設定に関わらず必ず
+    // バックアップに含める（v1.5.0。表示するかどうかとログを保全するかは別問題）。
+    if (ar.adapter.id === 'claude') {
+      for (const root of ar.roots) {
+        for (const f of await listSubagentJsonl(root.dir)) {
+          if (added.has(f) || isPathWithin(f, backupRoot)) continue;
+          added.add(f);
+          items.push({ filePath: f, source: 'claude', relPath: path.relative(root.dir, f) });
+        }
+      }
     }
   }
   const folder = backupFolderName(new Date());
@@ -574,7 +638,9 @@ function printVerbose(opts: CliOptions, config: CcxlogConfig, adapterRuns: Adapt
   for (const ar of adapterRuns) {
     console.log(`[${ar.adapter.id}] roots:`);
     for (const r of ar.roots) console.log(`  ${r.origin === 'extra' ? '*' : '+'} ${r.dir}`);
-    console.log(`[${ar.adapter.id}] files: ${ar.files.length}, fully read: ${ar.filesRead}, sessions kept: ${ar.sessions.length}`);
+    console.log(`[${ar.adapter.id}] files: ${ar.files.length}, fully read: ${ar.filesRead}, sessions kept: ${ar.sessions.length}`
+      + (ar.formatSkipped.length > 0 ? `, format-skipped: ${ar.formatSkipped.length}` : ''));
+    for (const f of ar.formatSkipped) console.log(`  skipped (not ${ar.adapter.id}-format): ${f}`);
   }
   void config;
 }

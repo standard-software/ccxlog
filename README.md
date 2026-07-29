@@ -97,9 +97,9 @@ Options:
                          stay attributable per PC.
   --backup-md            Back up only: copy the already-exported Markdown in <out>
                          into <out>/backup_CCXLOG_md/<yyyy-mm-dd_hh-mm-ss>_<host>/
-                         and exit WITHOUT regenerating anything. On-demand trigger
-                         of the same backup ccxlog makes automatically before a
-                         full rewrite of an existing output file.
+                         and exit WITHOUT regenerating anything. (Automatic
+                         pre-overwrite backups are stored separately, in
+                         backup_CCXLOG_md_auto/.)
   --lock                 Opt-in exclusive lock on <out> for the run (guards against
                          two ccxlog runs writing the same output concurrently).
   --force-unlock         Remove a stale lock left by a crashed run (use with --lock).
@@ -124,10 +124,12 @@ append, or a rewrite that keeps every existing `ccxlogid` (answer updates,
 template changes, inserting a Q&A at an earlier point in the timeline,
 reordering, and so on).
 
-Automatic backups are stored in:
+Automatic backups are stored in their own folder, separate from manual
+`--backup-md` copies — anything appearing here is a signal that previously
+rendered pairs were about to disappear:
 
 ```text
-CCXLOG/backup_CCXLOG_md/<yyyy-mm-dd_hh-mm-ss>_<hostname>/
+CCXLOG/backup_CCXLOG_md_auto/<yyyy-mm-dd_hh-mm-ss>_<hostname>/
 ```
 
 The backup is created and verified before the rewrite. If verification fails,
@@ -162,13 +164,30 @@ The destination has this structure:
 CCXLOG/
 └─ backup_jsonl/
    └─ <yyyy-mm-dd_hh-mm-ss>_<hostname>/
-      ├─ cc/   ← Claude Code JSONL
-      └─ cx/   ← Codex JSONL
+      ├─ cc/   ← Claude Code JSONL, mirroring the live layout:
+      │        <session id>.jsonl and <session id>/subagents/agent-*.jsonl
+      │        (subagent transcripts are always backed up, regardless of
+      │        the includeSidechain setting)
+      └─ cx/   ← Codex JSONL, preserving the <yyyy>/<mm>/<dd>/ date tree
+```
+
+Because the structure mirrors the live log layout, a snapshot can be read
+back exactly like the real log folders:
+
+```json
+"claude": { "extraLogDirs": ["backup_jsonl/<stamp>/cc"] },
+"codex":  { "extraLogDirs": ["backup_jsonl/<stamp>/cx"] }
 ```
 
 `--backup-jsonl` is a **standalone action**: it backs up only and exits without
 (re)generating Markdown. Combine it with `--dry-run` to preview the destination
 or `--verbose` to see each copied file.
+
+Files already under the destination (`<out>/backup_jsonl/`) are never used as
+a copy source, so repeated backups do not snowball into backups of backups.
+This makes it safe to point `extraLogDirs` at earlier snapshots (e.g.
+`backup_jsonl/<stamp>/cc`) to keep rendering sessions whose original logs have
+expired — the cross-file de-duplication collapses the overlap with live logs.
 
 ## Configuration
 
@@ -220,8 +239,8 @@ on Ubuntu/macOS (`/home/you/...`).
 |---------------------------|-----------------------------------------------------------------------------|
 | `outputAllFileName`       | Aggregate filename for `-cc` / `-cx` mode. Defaults `cclog.md` / `cxlog.md`. |
 | `outputSessionFilePrefix` | Prefix for per-session filenames (used with `--per-session`). Defaults `cclog_` / `cxlog_`, so files are `cclog_<id>.md` / `cxlog_<id>.md`. Empty string means no prefix. |
-| `extraLogDirs`            | Additional raw log directories to read verbatim (`~/.claude/projects/...` for claude, `~/.codex/sessions/...` for codex). Entries are read without the cwd filter. |
-| `includeSidechain`        | *(claude only)* If `true`, include subagent / sidechain pairs in the output. |
+| `extraLogDirs`            | Additional raw log directories to read verbatim (backup snapshots, log trees copied from another machine, ...). Entries are read without the cwd filter, and may point anywhere — including under `<out>` (e.g. `backup_jsonl/<stamp>/cc`). Each source ingests only files in its own format (claude skips Codex rollouts and vice versa; unrelated `.jsonl` is skipped by both, reported under `--verbose`). |
+| `includeSidechain`        | *(claude only)* If `true`, include subagent / sidechain records: sidechain-marked pairs inside the session logs, plus the separate `<session id>/subagents/*.jsonl` transcript files newer Claude Code versions write, which are rendered as additional sessions. |
 | `includeDeveloperMessages`| *(codex only)* If `true`, include Codex developer/system messages in the output. |
 
 Log-directory recursion is selected automatically for each source and is not
@@ -358,7 +377,7 @@ nothing has changed, the file's modification time is preserved as well.
   existing output `.md` in a way that would drop at least one `ccxlogid` the
   file already contains (or the comparison cannot be made safely), the existing
   file is first copied to
-  `CCXLOG/backup_CCXLOG_md/<yyyy-mm-dd_hh-mm-ss>_<hostname>/` so the previous
+  `CCXLOG/backup_CCXLOG_md_auto/<yyyy-mm-dd_hh-mm-ss>_<hostname>/` so the previous
   version is never lost. Backup folders accumulate and are never pruned. A
   first-time create, an unchanged run, a strict append, or a rewrite that keeps
   every existing `ccxlogid` (template changes, insertion of an earlier Q&A

@@ -133,7 +133,7 @@ test('rewrite backs up before overwriting', () => {
     const r = runCli([s.project], { home: s.home });
     assert.equal(r.code, 0, r.stderr);
     assert.match(r.stdout, /\[rewrite\]/);
-    const backups = path.join(s.out, 'backup_CCXLOG_md');
+    const backups = path.join(s.out, 'backup_CCXLOG_md_auto');
     assert.ok(fs.existsSync(backups));
     const stamped = fs.readdirSync(backups);
     assert.ok(stamped.length >= 1);

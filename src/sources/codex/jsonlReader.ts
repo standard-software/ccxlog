@@ -7,6 +7,7 @@ export interface CodexReadResult {
   entries: LogEntry[];
   skippedLines: number;
   fileSize: number;
+  formatRecognized: boolean;   // Codex rollout 形式のレコードを1つでも観測したか（§形式判定・v1.5.0）
   fileContentHash: () => Promise<string>;   // 遅延・メモ化（§6.3 完全コピー確認用）
   eventIdStream: string[];
   sessionId: string;
@@ -216,10 +217,17 @@ export async function readJsonl(filePath: string, includeDeveloperMessages = fal
     fallbackUsers = [];
   };
 
+  // Codex rollout と認識できる条件: rollout のレコード型（session_meta /
+  // turn_context / event_msg / response_item）を1つでも観測すること。1つも
+  // 無いファイル（Claude セッションログや無関係の jsonl）はソース不一致として
+  // 取り込み対象から外す（§形式判定・v1.5.0）。
+  let formatRecognized = false;
   await forEachLine(filePath, (line) => {
     if (!line.trim()) return;
     let event: Raw;
     try { event = JSON.parse(line) as Raw; } catch { skippedLines++; return; }
+    if (event.type === 'session_meta' || event.type === 'turn_context'
+      || event.type === 'event_msg' || event.type === 'response_item') formatRecognized = true;
     const payload = raw(event.payload);
     const timestamp = text(event.timestamp);
 
@@ -352,7 +360,7 @@ export async function readJsonl(filePath: string, includeDeveloperMessages = fal
   });
 
   return {
-    entries, skippedLines, fileSize: stat.size,
+    entries, skippedLines, fileSize: stat.size, formatRecognized,
     fileContentHash: lazyFileSha256(filePath, {
       size: stat.size, mtimeMs: stat.mtimeMs, dev: stat.dev, ino: stat.ino,
     }),

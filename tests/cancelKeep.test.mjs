@@ -168,7 +168,7 @@ test('R1-6/R4-4: aggregate — キャンセル質問が出力され、移行の�
   // ID 追加のみの書き換えなので自動バックアップは作られない（R2/R4-4）。
   assert.match(r.stdout, /\[rewrite\]/);
   assert.doesNotMatch(r.stdout, /Backed up/);
-  assert.equal(exists(path.join(ws.out, 'backup_CCXLOG_md')), false);
+  assert.equal(exists(path.join(ws.out, 'backup_CCXLOG_md_auto')), false);
 });
 
 test('R1-6/R4-4: per-session — キャンセル質問が出力され、移行の再生成はバックアップなしの rewrite', t => {
@@ -202,5 +202,5 @@ test('R1-6/R4-4: per-session — キャンセル質問が出力され、移行�
   // ID 追加のみの書き換えなので自動バックアップは作られない（R2/R4-4）。
   assert.match(r.stdout, /\[rewrite\]/);
   assert.doesNotMatch(r.stdout, /Backed up/);
-  assert.equal(exists(path.join(ws.out, 'backup_CCXLOG_md')), false);
+  assert.equal(exists(path.join(ws.out, 'backup_CCXLOG_md_auto')), false);
 });

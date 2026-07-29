@@ -96,9 +96,8 @@ Options:
                          どの PC のバックアップか判別できる。
   --backup-md            バックアップのみ: <out> の出力済み Markdown を
                          <out>/backup_CCXLOG_md/<yyyy-mm-dd_hh-mm-ss>_<host>/ に
-                         コピーして、何も再生成せずに終了する（既存出力を末尾追記
-                         以外の方法で書き換える前に
-                         ccxlog が自動で取るのと同じバックアップの手動トリガ）。
+                         コピーして、何も再生成せずに終了する（自動バックアップは
+                         別フォルダ backup_CCXLOG_md_auto/ に保存される）。
   --lock                 実行中、<out> に排他ロックを取る（2つの ccxlog 実行が同じ
                          出力を同時に書くのを防ぐ・オプトイン）。
   --force-unlock         クラッシュが残した古いロックを外す（--lock と併用）。
@@ -122,10 +121,11 @@ Markdown を書き換える際、**書き換え前に存在した `ccxlogid` が
 保たれる書き換え（回答内容の差し替え、テンプレート変更、過去の時点へのQ&Aの挿入、
 並び順変更など）ではバックアップを作成しません。
 
-自動バックアップは、次のディレクトリに保存されます。
+自動バックアップは、手動 `--backup-md` とは**別の専用フォルダ**に保存されます。
+ここに何かが増えたら「描画済みのペアが消えようとした」シグナルです。
 
 ```text
-CCXLOG/backup_CCXLOG_md/<yyyy-mm-dd_hh-mm-ss>_<hostname>/
+CCXLOG/backup_CCXLOG_md_auto/<yyyy-mm-dd_hh-mm-ss>_<hostname>/
 ```
 
 バックアップは書き換え前に取得・検証され、正常に保存できなければ元の Markdown を
@@ -159,14 +159,31 @@ ccxlog --backup-jsonl
   CCXLOG/
   └─ backup_jsonl/
      └─ <yyyy-mm-dd_hh-mm-ss>_<hostname>/
-        ├─ cc/   ← Claude Code の JSONL
-        └─ cx/   ← Codex の JSONL
+        ├─ cc/   ← Claude Code の JSONL（ライブ配置のミラー:
+        │        <セッションID>.jsonl と <セッションID>/subagents/agent-*.jsonl。
+        │        subagents は includeSidechain の設定に関わらず必ずバックアップ）
+        └─ cx/   ← Codex の JSONL（<年>/<月>/<日>/ の日付ツリーを保存）
+```
+
+構造がライブのログ配置のミラーなので、スナップショットは本物のログフォルダと
+まったく同じように読み戻せます:
+
+```json
+"claude": { "extraLogDirs": ["backup_jsonl/<日時>/cc"] },
+"codex":  { "extraLogDirs": ["backup_jsonl/<日時>/cx"] }
 ```
 
 `--backup-jsonl` は**単独アクション**で、バックアップだけして終了するので、
 Markdown の（再）生成は**行いません**。
 `--dry-run` と併用すればコピー先のプレビュー、
 `--verbose` でコピーした各ファイルを確認できます。
+
+コピー先（`<out>/backup_jsonl/`）配下に既にあるファイルはコピー元として
+使われないため、バックアップを繰り返しても「バックアップのバックアップ」で
+膨れることはありません。そのため過去のスナップショット
+（例: `backup_jsonl/<日時>/cc`）を安心して `extraLogDirs` に指定でき、
+元ログが期限切れで消えたセッションも出力し続けられます（現行ログと重なる
+ぶんはファイル横断の重複排除で1本化されます）。
 
 ## 設定
 
@@ -219,8 +236,8 @@ Ubuntu/macOS ではスラッシュ区切りのパス（`/home/you/...`）を使�
 |---------------------------|-----------------------------------------------------------------------------|
 | `outputAllFileName`       | `-cc` / `-cx` モードの集約ファイル名。既定 `cclog.md` / `cxlog.md`。 |
 | `outputSessionFilePrefix` | セッションごとのファイル名の接頭辞（`--per-session` で使用）。既定 `cclog_` / `cxlog_` で、`cclog_<id>.md` / `cxlog_<id>.md` になる。空文字なら接頭辞なし。 |
-| `extraLogDirs`            | そのまま読み取る追加の生ログディレクトリ（claude は `~/.claude/projects/...`、codex は `~/.codex/sessions/...`）。cwd フィルタなしで読む。 |
-| `includeSidechain`        | *(claude のみ)* `true` ならサブエージェント／サイドチェーンのペアも出力に含める。 |
+| `extraLogDirs`            | そのまま読み取る追加の生ログディレクトリ（バックアップのスナップショット、別マシンから持ってきたログツリーなど）。cwd フィルタなしで読み、`<out>` 配下（例: `backup_jsonl/<日時>/cc`）を含めどこでも指定できる。各ソースは自分の形式のファイルだけを取り込む（claude は Codex rollout を、codex は Claude セッションログを読み飛ばし、無関係な `.jsonl` は両方が読み飛ばす。`--verbose` で表示）。 |
+| `includeSidechain`        | *(claude のみ)* `true` ならサブエージェント／サイドチェーンの記録を出力に含める。セッションログ内の sidechain ペアに加えて、新しめの Claude Code が書く `<セッションID>/subagents/*.jsonl` 形式の別ファイルも探索し、追加セッションとして描画する。 |
 | `includeDeveloperMessages`| *(codex のみ)* `true` なら Codex の developer/system メッセージも出力に含める。 |
 
 ログディレクトリを再帰探索するかどうかは、ソースごとに自動選択され、設定する必要は
@@ -350,7 +367,7 @@ ccxlog は、生成結果が変わる場合にだけ出力ファイルを更新�
 - **Markdown の上書き前バックアップ。** 既存の出力 `.md` の書き換えで、ファイルに
   あった `ccxlogid` が1つでも失われる場合（または安全に判定できない場合）は、
   書き換える前に既存ファイルを
-  `CCXLOG/backup_CCXLOG_md/<yyyy-mm-dd_hh-mm-ss>_<hostname>/` にコピーするので、
+  `CCXLOG/backup_CCXLOG_md_auto/<yyyy-mm-dd_hh-mm-ss>_<hostname>/` にコピーするので、
   以前のバージョンが失われることはありません。バックアップフォルダは蓄積され、
   自動削除されません。初回作成・変化なし・純粋な末尾追記・既存 `ccxlogid` が
   すべて保たれる書き換え（テンプレート変更、過去の時点へのQ&Aの挿入、回答の

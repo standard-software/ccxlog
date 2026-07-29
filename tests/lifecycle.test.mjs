@@ -50,7 +50,7 @@ test('inserting an earlier pair rewrites WITHOUT a backup (all ids preserved, R2
   assert.match(r.stdout, /\[rewrite\]/);
   // 途中挿入は既存 ccxlogid を 1 つも失わないので自動バックアップなし。
   assert.doesNotMatch(r.stdout, /Backed up/);
-  assert.equal(exists(path.join(ws.out, 'backup_CCXLOG_md')), false);
+  assert.equal(exists(path.join(ws.out, 'backup_CCXLOG_md_auto')), false);
   const md = read(path.join(ws.out, 'cclog.md'));
   assert.ok(md.indexOf('earlier') < md.indexOf('later'));
 });
@@ -67,7 +67,7 @@ test('deleting a source log triggers a rewrite backed up first', t => {
   const r = run([ws.project, '--out', ws.out, '-cc'], { home: ws.home });
   assert.match(r.stdout, /\[rewrite\]/);
   assert.match(r.stdout, /Backed up 1 pre-overwrite md file/);
-  assert.equal(exists(path.join(ws.out, 'backup_CCXLOG_md')), true);
+  assert.equal(exists(path.join(ws.out, 'backup_CCXLOG_md_auto')), true);
   const md = read(path.join(ws.out, 'cclog.md'));
   assert.match(md, /keep/);
   assert.doesNotMatch(md, /doomed/);
@@ -86,7 +86,7 @@ test('changing only the template rewrites WITHOUT a backup (ids preserved, R2)',
   assert.match(r.stdout, /\[rewrite\]/);
   // テンプレート変更でも ccxlogid は全て保たれるので自動バックアップなし。
   assert.doesNotMatch(r.stdout, /Backed up/);
-  assert.equal(exists(path.join(ws.out, 'backup_CCXLOG_md')), false);
+  assert.equal(exists(path.join(ws.out, 'backup_CCXLOG_md_auto')), false);
   assert.match(read(path.join(ws.out, 'cclog.md')), /Q: stable/);
 });
 

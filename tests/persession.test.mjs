@@ -66,7 +66,7 @@ test('an owned 0-pair session file is deleted after a pre-delete backup (§9.7)'
   assert.equal(r.status, 0, r.stderr);
   assert.equal(exists(path.join(ws.out, 'cclog_sess.md')), false);
   // A pre-delete backup folder was created.
-  const backupRoot = path.join(ws.out, 'backup_CCXLOG_md');
+  const backupRoot = path.join(ws.out, 'backup_CCXLOG_md_auto');
   const backups = exists(backupRoot) ? fs.readdirSync(backupRoot) : [];
   assert.ok(backups.length >= 1);
 });

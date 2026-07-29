@@ -10,6 +10,9 @@ export interface RootRef {
   origin: 'standard' | 'extra';
   stableRootKey: string;
   recursive: boolean;
+  // Claude 専用（includeSidechain 有効時）: ルート直下の各セッションディレクトリの
+  // subagents/*.jsonl（サブエージェント記録の別ファイルレイアウト）も探索する
+  scanSubagentDirs?: boolean;
 }
 
 export interface DiscoveredFile {
@@ -29,6 +32,7 @@ export interface SessionData {
   eventIdStream: string[];           // 安定イベントID列（生文字列。§6.3 サブシーケンス確認）
   allPairs: Pair[];
   skippedLines: number;
+  formatRecognized: boolean;         // 自ソース形式のレコードを観測したか（§形式判定・v1.5.0）
 }
 
 export interface FilterContext {

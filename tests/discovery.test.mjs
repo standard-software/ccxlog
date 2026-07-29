@@ -31,7 +31,12 @@ test('recursion is source-defined and legacy config values are ignored', t => {
   assert.match(md, /codex nested/);
 });
 
-test('templates/ and backup_* subdirectories are never ingested', t => {
+// v1.5.0 仕様変更: 明示指定した extra ルートの配下は「名前」でも「<out> 内包」
+// でも除外しない — ユーザーが指した場所を読むのが意図どおり。
+// （旧仕様は templates/ backup_*/ と <out> 配下を一律ブロックしていた。
+//   --backup-jsonl の自己増殖は探索でなくコピー元選定で防ぐ。
+//   → tests/backupSelfExclusion.test.mjs）
+test('an explicit extra root ingests everything under it, including backup_*/templates (v1.5.0)', t => {
   const ws = workspace(t);
   const logs = path.join(ws.root, 'logs');
   writeJsonl(path.join(logs, 'keep', 'real.jsonl'), codexQA(ws.project, { sessionId: 'k', q: 'real question' }));
@@ -43,15 +48,13 @@ test('templates/ and backup_* subdirectories are never ingested', t => {
   assert.equal(r.status, 0, r.stderr);
   const md = read(path.join(ws.out, 'cxlog.md'));
   assert.match(md, /real question/);
-  assert.doesNotMatch(md, /template decoy/);
-  assert.doesNotMatch(md, /backup decoy/);
+  assert.match(md, /template decoy/);
+  assert.match(md, /backup decoy/);
 });
 
-test('the generated <out> is excluded from discovery (never re-ingested)', t => {
+test('an explicit extra root enclosing <out> also reads jsonl inside it (v1.5.0)', t => {
   const ws = workspace(t);
-  // A decoy jsonl placed under <out> must not be discovered even if a root
-  // encloses it.
-  writeJsonl(path.join(ws.out, 'sneaky.jsonl'), codexQA(ws.project, { sessionId: 's', q: 'sneaky decoy' }));
+  writeJsonl(path.join(ws.out, 'inside-out.jsonl'), codexQA(ws.project, { sessionId: 's', q: 'inside-out question' }));
   writeJsonl(path.join(ws.project, 'realdir', 'a.jsonl'), codexQA(ws.project, { sessionId: 'r', q: 'legit question' }));
   writeConfig(ws.out, { codex: { extraLogDirs: [ws.project] } });
 
@@ -59,7 +62,7 @@ test('the generated <out> is excluded from discovery (never re-ingested)', t => 
   assert.equal(r.status, 0, r.stderr);
   const md = read(path.join(ws.out, 'cxlog.md'));
   assert.match(md, /legit question/);
-  assert.doesNotMatch(md, /sneaky decoy/);
+  assert.match(md, /inside-out question/);
 });
 
 test('reordering extraLogDirs does not change the output byte-for-byte (§5.5)', t => {

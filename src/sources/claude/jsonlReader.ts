@@ -9,6 +9,7 @@ export interface ClaudeReadResult {
   fileSize: number;
   fileContentHash: () => Promise<string>;   // 遅延・メモ化（§6.3 完全コピー確認用）
   eventIdStream: string[];
+  formatRecognized: boolean;   // Claude 形式のエントリを1つでも観測したか（§形式判定・v1.5.0）
 }
 
 // Claude Code の JSONL ファイルを読む。壊れた行はカウントしてスキップし、
@@ -23,11 +24,17 @@ export async function readJsonl(filePath: string): Promise<ClaudeReadResult> {
   const entries: LogEntry[] = [];
   const eventIdStream: string[] = [];
   let skipped = 0;
+  // Claude のセッションログと認識できる条件: message を持つ user / assistant
+  // エントリが1つでもあること。1つも無いファイル（Codex rollout や無関係の
+  // jsonl）はソース不一致として取り込み対象から外す（§形式判定・v1.5.0）。
+  let formatRecognized = false;
   await forEachLine(filePath, (line) => {
     if (!line.trim()) return;
     try {
       const entry = JSON.parse(line) as LogEntry;
       entries.push(entry);
+      if ((entry.type === 'user' || entry.type === 'assistant')
+        && (entry as { message?: unknown }).message) formatRecognized = true;
       const uuid = (entry as { uuid?: unknown }).uuid;
       const id = typeof uuid === 'string' ? uuid : '';
       eventIdStream.push(`${entry.type}\0${id}`);
@@ -43,5 +50,6 @@ export async function readJsonl(filePath: string): Promise<ClaudeReadResult> {
       size: stat.size, mtimeMs: stat.mtimeMs, dev: stat.dev, ino: stat.ino,
     }),
     eventIdStream,
+    formatRecognized,
   };
 }
