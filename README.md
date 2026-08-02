@@ -1,6 +1,6 @@
 # ccxlog
 
-**Language:** [Japanese/日本語](README_Japanese.md)
+**Language:** [Japanese](README_Japanese.md)
 
 ccxlog is a command-line tool that combines Claude Code and Codex CLI session
 logs into one readable Markdown timeline.
@@ -100,14 +100,122 @@ Options:
                          and exit WITHOUT regenerating anything. (Automatic
                          pre-overwrite backups are stored separately, in
                          backup_CCXLOG_md_auto/.)
-  --lock                 Opt-in exclusive lock on <out> for the run (guards against
-                         two ccxlog runs writing the same output concurrently).
+  --lock                 Explicitly request the exclusive output lock (write
+                         operations and --watch lock automatically; this option is
+                         retained for compatibility).
   --force-unlock         Remove a stale lock left by a crashed run (use with --lock).
+  --watch                Run repeatedly: process, wait N seconds, process again
+                         (N = watchIntervalSeconds in ccxlog.config.json; default 5).
+  --watch=<n><unit>      Same, but stop after the given duration measured from the
+                         start (positive integer + one unit s/m/h/d, e.g.
+                         --watch=60s). A number without a unit (--watch=60) is an
+                         error.
   --dry-run              Don't write files; report what would be written.
   --verbose              Verbose logging.
   -v, -V, --version      Show version and exit.
   -h, --help             Show this help.
 ```
+
+### Watch mode
+
+`ccxlog --watch` keeps a single ccxlog run going: it processes, waits N seconds,
+processes again, and so on, so `CCXLOG/ccxlog.md` stays current while you work.
+It combines with `-cc` / `-cx` / `--out` / `--per-session` / `--dry-run` /
+`--verbose`; each cycle is exactly the same operation as one plain
+run, including the smart-write behavior described below (unchanged content is a
+noop, so the file you have open in an editor is not rewritten every 5 seconds).
+
+```bash
+ccxlog --watch            # until you stop it
+ccxlog --watch=60s        # stop 60 seconds after the start
+ccxlog -cc --watch=2h     # Claude Code only, for two hours
+```
+
+- The wait is **fixed**, not a fixed period: with a 5 s wait and 3 s of
+  processing, cycles start roughly every 8 s. Cycles never overlap or catch up.
+- The duration unit is required and single: `s`, `m`, `h` or `d`, from `1s` to
+  `366d`. `--watch=60`, `--watch=060s` and `--watch=1h30m` are usage errors.
+- A watch holds the output lock from startup until it stops, including between
+  cycles. Another watch or one-shot ccxlog writing to the same output directory
+  exits with a lock error. One-shot write operations also lock automatically.
+- `--watch` cannot be combined with `--force-unlock`: a watch would tear off
+  someone else's lock on every cycle. If a crashed run left a stale lock behind,
+  clear it with a one-shot `ccxlog --lock --force-unlock` and then start the
+  watch.
+- The wait length comes from `watchIntervalSeconds` in the configuration file
+  (default 5). It is re-read every cycle, so editing it takes effect without a
+  restart.
+- By default only cycles that changed something print a line. `--verbose` prints
+  the full per-cycle detail.
+- Exit codes: 0 when the duration elapses, 130 for Ctrl+C, 143 for `kill`
+  (POSIX), 1 for a startup failure, 2 for a usage error. A failed cycle does not
+  stop the watch and does not change the exit code.
+
+The `=` form is safe to type as-is in PowerShell, bash, zsh and cmd.exe; no
+shell quoting is required.
+
+#### Incremental re-parsing
+
+From the second cycle on, a watch only re-reads log files that actually changed.
+It keeps the parsed sessions of the previous cycle in memory and compares each
+discovered file by four attributes — **size, mtime, device id and inode**. If all
+four match, the file is neither re-read nor re-scanned; the Codex "this rollout
+belongs to another project" verdict is remembered the same way. Files that
+changed are re-read, new files are read, and files that are no longer discovered
+are dropped from memory.
+
+- The output is unaffected: a cycle that reuses cached parses writes exactly the
+  same bytes as a cold run over the same logs. Merging, de-duplication,
+  `ccxlogid` numbering and the smart-write decision all stay identical.
+- Only sessions that reached the output keep their parsed data. A file that was
+  read and then discarded — not this project's, or not this source's format — is
+  remembered by its verdict alone, so a watch holds no more in memory than a
+  single run does.
+- The cache lives only inside the running watch process. Nothing is written to
+  disk, and it is gone when the watch stops. The first cycle is always cold.
+- Any change to the configuration, the target project or the mode drops the whole
+  cache, so the next cycle re-reads everything. Symlinked paths are resolved
+  afresh every cycle, so re-pointing a symlink also takes effect on the next one
+  — including a link a session's own `cwd` goes through: a remembered "belongs
+  to another project" verdict is re-checked against that resolution each cycle
+  and thrown away as soon as it changes.
+- `--verbose` reports the split for every cycle, e.g.
+  `… , cache 2 reparsed / 238 reused`.
+
+**Reading the `--verbose` counters.** `files` is what discovery found;
+`fully read` is how many of those files were analysed for this cycle — *not* how
+many were read from disk. Under `--watch`, a file whose parse came from the cache
+is still counted in `fully read`. The number actually read from disk this cycle is
+`reparsed`; `reused` is the rest. In a quiet cycle you will therefore see a large
+`fully read` next to `reparsed: 0`, and that is the mechanism working.
+
+On an unchanging 46 MiB log set (240 files), no-change cycles went from 0.8 s to
+0.4 s; the remaining time is discovery, rendering and the smart-write comparison,
+which this mechanism does not touch. Peak memory is set by the first (cold)
+cycle and does not grow with the number of cycles.
+
+#### Stopping a watch
+
+Press **Ctrl+C** in the terminal that runs it. The watch finishes the cycle it is
+in, prints a summary, and exits with code 130.
+
+To stop it from another terminal, use your OS with the pid printed in the start
+banner:
+
+```
+ccxlog watch started (pid 12345): interval 5s, duration unlimited, mode both
+  project: C:\Users\you\projects\my-app
+  output:  C:\Users\you\projects\my-app\CCXLOG\ccxlog.md
+Press Ctrl+C to stop, or terminate pid 12345 from another terminal (e.g. taskkill /F /PID 12345).
+```
+
+- **Windows**: `taskkill /F /PID 12345`
+- **Linux / WSL / macOS**: `kill 12345` — this is a graceful stop (SIGTERM): the
+  current cycle finishes, the summary is printed, and the exit code is 143.
+
+The output file is committed atomically (write to a temporary file, then
+rename), so stopping a watch at any moment — including a force kill — never
+leaves a half-written Markdown file behind.
 
 ### Manual and automatic output Markdown backups
 
@@ -203,6 +311,7 @@ or `codex` namespace:
     "/home/you/projects/another-project"
   ],
   "includeSubdirectories": true,
+  "watchIntervalSeconds": 5,
   "outputAllFileName": "ccxlog.md",
   "template": "templates/english.md",
 
@@ -230,6 +339,7 @@ on Ubuntu/macOS (`/home/you/...`).
 |---------------------------|-----------------------------------------------------------------------------|
 | `extraCwds`               | Additional project directories whose logs (from either tool) should be merged into the output. |
 | `includeSubdirectories`   | If `true` (default), also collect logs from projects whose cwd is a *subdirectory* of the project ccxlog runs in (e.g. running in `~/work/app` also gathers `~/work/app/frontend`). Nested candidates are verified against each session's real cwd, so same-prefix siblings like `~/work/app-backup` are never included. Set `false` to match only the exact project path (plus `extraCwds` / `extraLogDirs`). |
+| `watchIntervalSeconds`    | How long `--watch` waits between cycles, in seconds. Integer, 1-86400, default `5`. An out-of-range or non-integer value warns once and falls back to 5. Ignored when `--watch` is not used. |
 | `outputAllFileName`       | Filename for the **merged** (`both`) aggregate output. Default `ccxlog.md`. The title inside the file is derived from the basename. |
 | `template`                | Path to a Markdown template. Resolved against ccxlog's own `templates/` dir first, then your CCXLOG dir. |
 
@@ -267,7 +377,7 @@ A template can use the following placeholders:
 | `%SourceShort%`   | Short source tag — `cc` or `cx`                          |
 | `%CcxlogId%`      | `ccxlogid` — an answer-independent, cross-tool-stable id used as the block's identity marker |
 | `%SessionId%`     | The session id                                           |
-| `%SessionName%`   | Human-readable session name — the custom title if set, else the tool's auto-generated title, else empty |
+| `%SessionName%`   | Human-readable session name — for Codex, `thread_name` from `~/.codex/session_index.jsonl`; for Claude Code, the custom or generated title; empty when unavailable |
 | `%Question%`      | The user's message                                       |
 | `%Answer%`        | The assistant's reply                                    |
 | `%Progress%`      | (optional) Tool calls between Q and A, **summarized**     |
@@ -287,6 +397,14 @@ entirely by the template:
 
 Use one of the two progress placeholders, not both. (There is no CLI flag for
 this — verbosity follows the template.)
+
+A template that references neither placeholder also costs nothing in memory:
+the raw tool input/output between Q and A is dropped as soon as a session is
+parsed, instead of being kept around (which matters most for `--watch`, whose
+resident set holds the previous cycle's analysis). Editing the template to add
+or remove a progress placeholder is picked up on the next cycle — the analysis
+cache is dropped and every file is re-read, so the output is always the one the
+current template asks for.
 
 #### Customizing a template
 

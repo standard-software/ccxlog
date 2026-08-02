@@ -1,7 +1,3 @@
-// --backup-jsonl の自己増殖防止（v1.5.0）: extraLogDirs がコピー先
-// （<out>/backup_jsonl）配下を指していても、既にそこにあるファイルは
-// バックアップの「コピー元」にしない。読み込み（Markdown 出力への読み戻し）は
-// 従来どおり行われる。
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -40,6 +36,5 @@ test('--backup-jsonl never re-copies files already under its own destination', t
   const copied = fs.readdirSync(newSnapCc);
   assert.ok(copied.some(f => f.startsWith('live')), `live log must be backed up: ${copied.join(', ')}`);
   assert.ok(!copied.some(f => f.startsWith('expired')), `old backup must NOT be re-copied: ${copied.join(', ')}`);
-  // 旧スナップショットは無傷
   assert.ok(fs.existsSync(path.join(ws.out, 'backup_jsonl', '2026-01-01_00-00-00_OLDPC', 'cc', 'expired.jsonl')));
 });

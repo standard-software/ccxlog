@@ -102,16 +102,14 @@ test('--dry-run --init-template creates nothing', t => {
   assert.equal(exists(path.join(ws.out, 'templates')), false);
 });
 
-// v1.5.0: --backup-jsonl は構造を保存する（cc はライブ配置のミラー・cx は日付ツリー）。
-// subagents は includeSidechain の設定に関わらず必ずバックアップされる。
 function sidechainRecords(projectPath) {
   const ts = '2026-05-27T10:00:00.000Z';
   return [
     { type: 'user', uuid: 'sub-u1', parentUuid: null, timestamp: ts, cwd: projectPath,
-      isSidechain: true, message: { role: 'user', content: 'サブエージェントへの指示' } },
+      isSidechain: true, message: { role: 'user', content: 'Instructions for the subagent' } },
     { type: 'assistant', uuid: 'sub-a1', parentUuid: 'sub-u1', timestamp: ts, cwd: projectPath,
       isSidechain: true,
-      message: { role: 'assistant', model: 'claude-opus-4-8', content: [{ type: 'text', text: 'サブエージェントの報告' }] } },
+      message: { role: 'assistant', model: 'claude-opus-4-8', content: [{ type: 'text', text: 'Subagent report' }] } },
   ];
 }
 
@@ -120,7 +118,6 @@ test('--backup-jsonl preserves structure and always includes subagents', t => {
   writeJsonl(path.join(ws.ccLogs, 'sess1.jsonl'), claudeQA(ws.project));
   writeJsonl(path.join(ws.ccLogs, 'sess1', 'subagents', 'agent-a1.jsonl'), sidechainRecords(ws.project));
   writeJsonl(path.join(ws.cxLogs, '2026', '05', '27', 'rollout-x.jsonl'), codexQA(ws.project));
-  // includeSidechain は未指定（false）のまま
   writeConfig(ws.out, { claude: { extraLogDirs: [ws.ccLogs] }, codex: { extraLogDirs: [ws.cxLogs] } });
 
   const r = run([ws.project, '--out', ws.out, '--backup-jsonl'], { home: ws.home });
@@ -141,7 +138,6 @@ test('a structure-preserving snapshot restores via extraLogDirs cc/cx after sour
   assert.equal(run([ws.project, '--out', ws.out, '--backup-jsonl'], { home: ws.home }).status, 0);
   const stamp = onlyStamp(path.join(ws.out, 'backup_jsonl'));
 
-  // ソースログ消失を再現し、スナップショットだけで再生成する
   fs.rmSync(ws.ccLogs, { recursive: true, force: true });
   fs.rmSync(ws.cxLogs, { recursive: true, force: true });
   writeConfig(ws.out, {
@@ -152,6 +148,6 @@ test('a structure-preserving snapshot restores via extraLogDirs cc/cx after sour
   assert.equal(r.status, 0, r.stderr);
   const md = read(path.join(ws.out, 'ccxlog.md'));
   assert.match(md, /CLAUDE-MAIN-Q/);
-  assert.match(md, /サブエージェントの報告/);   // subagents もライブ同様に読める
-  assert.match(md, /CODEX-MAIN-Q/);            // 日付ツリーは再帰探索で読める
+  assert.match(md, /Subagent report/);
+  assert.match(md, /CODEX-MAIN-Q/);
 });

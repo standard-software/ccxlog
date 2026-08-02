@@ -44,6 +44,11 @@ export function writeCodexSession(home, name, records, [y, m, d] = ['2026', '05'
   writeJsonl(path.join(dir, name), records);
 }
 
+// Write the Codex session-name index used by current CLI releases.
+export function writeCodexSessionIndex(home, records) {
+  writeJsonl(path.join(home, '.codex', 'session_index.jsonl'), records);
+}
+
 // Build a minimal Claude session: one question + one answer.
 export function claudeQA(projectPath, {
   q = 'Hello Claude', a = 'Hi from Claude', ts = '2026-05-27T11:03:49.000Z',

@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DEFAULT_TEMPLATE } from './templates.js';
+import { DEFAULT_INTERVAL_SECONDS, validateIntervalSeconds } from './watchArgs.js';
 
 // Package root: two levels up from dist/lib/config.js.
 export const PACKAGE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -20,6 +21,10 @@ export interface CcxlogConfig {
   // pulled in. Set false to restore exact-project-only matching (plus
   // extraCwds / extraLogDirs).
   includeSubdirectories: boolean;
+  // The watch wait time in seconds (watch-spec §4) — the wait in "process ->
+  // wait this many seconds -> process". A run without watch reads it but never
+  // uses it (which is neither a warning nor an error).
+  watchIntervalSeconds: number;
   outputAllFileName: string;
   templateRaw: string | undefined;   // raw config value (undefined if unset)
   templateExplicit: boolean;
@@ -42,6 +47,7 @@ export function defaultConfig(): CcxlogConfig {
   return {
     extraCwds: [],
     includeSubdirectories: true,
+    watchIntervalSeconds: DEFAULT_INTERVAL_SECONDS,
     outputAllFileName: 'ccxlog.md',
     templateRaw: undefined,
     templateExplicit: false,
@@ -166,7 +172,7 @@ function asString(v: unknown, fallback: string, label: string, warnings: string[
   return fallback;
 }
 
-const TOP_KEYS = new Set(['extraCwds', 'includeSubdirectories', 'outputAllFileName', 'template', 'claude', 'codex']);
+const TOP_KEYS = new Set(['extraCwds', 'includeSubdirectories', 'watchIntervalSeconds', 'outputAllFileName', 'template', 'claude', 'codex']);
 const CLAUDE_KEYS = new Set(['outputAllFileName', 'outputSessionFilePrefix', 'extraLogDirs', 'includeSidechain']);
 const CODEX_KEYS = new Set(['outputAllFileName', 'outputSessionFilePrefix', 'extraLogDirs', 'includeDeveloperMessages']);
 
@@ -264,6 +270,11 @@ export async function loadConfig(
 
   config.extraCwds = asStringArray(obj.extraCwds, 'extraCwds', warnings);
   config.includeSubdirectories = asBool(obj.includeSubdirectories, config.includeSubdirectories, 'includeSubdirectories', warnings);
+  // watchIntervalSeconds follows the same "warn + default" shape as asBool /
+  // asString (§4.2). A bad wait time cannot damage a file, so it is not fatal.
+  const interval = validateIntervalSeconds(obj.watchIntervalSeconds);
+  config.watchIntervalSeconds = interval.seconds;
+  if (interval.warning) warnings.push(interval.warning);
   config.outputAllFileName = asString(obj.outputAllFileName, config.outputAllFileName, 'outputAllFileName', warnings);
   config.claude.outputAllFileName = asString(claude.outputAllFileName, config.claude.outputAllFileName, 'claude.outputAllFileName', warnings);
   config.codex.outputAllFileName = asString(codex.outputAllFileName, config.codex.outputAllFileName, 'codex.outputAllFileName', warnings);

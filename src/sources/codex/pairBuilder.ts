@@ -9,16 +9,6 @@ function isAssistant(e: LogEntry): e is AssistantEntry {
   return e.type === 'assistant' && !!(e as AssistantEntry).message;
 }
 
-export function extractSessionName(entries: LogEntry[]): string {
-  let name = '';
-  for (const entry of entries) {
-    const value = (entry as Record<string, unknown>).sessionName
-      ?? (entry as Record<string, unknown>).title;
-    if (typeof value === 'string' && value.trim()) name = value;
-  }
-  return name;
-}
-
 // Build chronological Q&A pairs. task_complete is NOT the boundary: a real
 // user message after ANY model activity (a final answer OR progress such as
 // reasoning / tool calls) closes the previous pair. This matters for

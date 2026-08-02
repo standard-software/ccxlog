@@ -87,8 +87,8 @@ export async function acquireLock(outDir: string, forceUnlock: boolean): Promise
       // Same host, well-formed lock, and the holder PID is not running at all —
       // the original holder is unambiguously gone (PID-reuse only matters when a
       // process still occupies the id, which pidAlive would have reported). This
-      // is the "明白に安全" case §8.6 permits. Compare-and-swap: only remove if
-      // the on-disk bytes still equal what we inspected.
+      // is the "unambiguously safe" case §8.6 permits. Compare-and-swap: only
+      // remove if the on-disk bytes still equal what we inspected.
       const unchanged = await fs.readFile(filePath, 'utf-8').catch(() => '');
       if (unchanged === rawExisting) {
         await fs.rm(filePath, { force: true });

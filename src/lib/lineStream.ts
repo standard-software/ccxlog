@@ -1,35 +1,37 @@
 import { createReadStream } from 'node:fs';
 import { StringDecoder } from 'node:string_decoder';
 
-// ファイルを1行ずつストリーム処理する（§12.3: ファイル全体を1つの文字列や
-// 全行配列として保持しない）。`onLine` は改行区切りの各行を終端文字なしで
-// 受け取る（split('\n') 相当。末尾の空行は渡さない）。
+// Stream a file line by line (§12.3: never hold the whole file as one string or
+// as an array of all lines). `onLine` receives each newline-delimited line
+// without its terminator (equivalent to split('\n'); a trailing empty line is
+// not passed).
 //
-// 性能メモ（R1 実測: WSL 実ログ約350MB）:
-// - 読み込みチャンクは 8MB。既定の 64KB highWaterMark では 350MB あたり
-//   約5,500回の 'data' イベントが発生し、イベント毎のオーバーヘッドと
-//   読み込み/処理の待ち合わせだけで実時間が約2倍になっていた
-//   （4.9s→2.2s に改善）。8MB でも保持するのはチャンク単位のみで、
-//   「ファイル全体は保持しない」という上限は保たれる。
-// - 行の切り出しはチャンク毎に1回の split('\n')。旧実装は1行ごとに残り
-//   バッファを slice し直して（buf = buf.slice(nl+1)）残り全体をコピー
-//   していたため、チャンク内で二次関数的なコストになっていた（CPU
-//   プロファイルで slice ループ約1.4s + GC 約0.5s を確認）。split 版は
-//   チャンク長に対して線形。
-// - マルチバイト文字のチャンク境界分断は StringDecoder が吸収する
-//   （境界をまたぐ UTF-8 シーケンスは次チャンクと連結して復元される）。
-// - 旧実装が読み込みと同時に計算していた全ファイル SHA-256 は、§6.3 の
-//   重複確認でしか使われず滅多に発火しないため遅延化した
-//   （pathUtils の lazyFileSha256 を参照）。
+// Performance notes (measured in R1 on ~350MB of real WSL logs):
+// - The read chunk is 8MB. With the default 64KB highWaterMark, 350MB produced
+//   roughly 5,500 'data' events, and the per-event overhead plus the
+//   read/process handoff alone doubled wall-clock time (4.9s -> 2.2s). Even at
+//   8MB only one chunk is held at a time, so the "never hold the whole file"
+//   bound still stands.
+// - Lines are cut with a single split('\n') per chunk. The old implementation
+//   re-sliced the remaining buffer for every line (buf = buf.slice(nl+1)),
+//   copying the whole remainder each time, which made the cost quadratic within
+//   a chunk (CPU profiling showed ~1.4s in the slice loop plus ~0.5s of GC).
+//   The split version is linear in chunk length.
+// - Multi-byte characters split across a chunk boundary are absorbed by
+//   StringDecoder (a UTF-8 sequence spanning the boundary is rejoined with the
+//   next chunk).
+// - The whole-file SHA-256 the old implementation computed during reading is now
+//   lazy: it is used only by the §6.3 duplicate check and almost never fires
+//   (see lazyFileSha256 in pathUtils).
 //
-// export しているのはチャンク境界テスト（tests/speedupGuards.test.mjs）が
-// この値を参照するため。テスト側に複製すると、将来ここを変えた時に境界
-// テストが黙って別の境界を試験するようになる（R2 レポート指摘）。
+// This is exported because the chunk-boundary test
+// (tests/speedupGuards.test.mjs) reads the value. Duplicating it in the test
+// would let a future change here silently move the boundary the test exercises.
 export const READ_CHUNK_BYTES = 8 * 1024 * 1024;
 
-// `onLine` が false を返した時点で読み込みを中断して resolve する
-// （Codex プリフィルタの early-return 用）。void（undefined）を返す
-// 既存の呼び出し側は従来どおり全行を処理する。
+// Reading stops and the promise resolves as soon as `onLine` returns false
+// (used by the Codex prefilter's early return). Existing callers that return
+// void (undefined) still process every line.
 export async function forEachLine(
   filePath: string,
   onLine: (line: string) => void | boolean,
@@ -38,8 +40,9 @@ export async function forEachLine(
   let buf = '';
   await new Promise<void>((resolve, reject) => {
     const stream = createReadStream(filePath, { highWaterMark: READ_CHUNK_BYTES });
-    // settled で resolve/reject を一元管理する（early-stop の destroy() 後に
-    // 届く 'error'、resolve 済み後の reject を確実に無視する）。
+    // `settled` centralises resolve/reject so that an 'error' arriving after an
+    // early-stop destroy(), or a reject after we already resolved, is reliably
+    // ignored.
     let settled = false;
     const finish = (): void => {
       if (settled) return;
@@ -49,9 +52,9 @@ export async function forEachLine(
     stream.on('data', (chunk: string | Buffer) => {
       const b: Buffer = typeof chunk === 'string' ? Buffer.from(chunk) : chunk;
       buf += decoder.write(b);
-      if (buf.indexOf('\n') === -1) return;   // 完全な行がまだ無い
+      if (buf.indexOf('\n') === -1) return;   // no complete line yet
       const parts = buf.split('\n');
-      buf = parts.pop() as string;            // 末尾要素は未完の行（次チャンクへ持ち越し）
+      buf = parts.pop() as string;            // the tail is an unfinished line, carried to the next chunk
       for (const part of parts) {
         if ((onLine(part) as boolean | undefined) === false) {
           stream.destroy();

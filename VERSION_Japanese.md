@@ -4,6 +4,16 @@
 
 ## Version
 
+### 1.6.0
+#### 2026/08/03(月)
+- 継続更新する `--watch` を追加。`--watch=8h` の時間指定と、
+  `watchIntervalSeconds` による待機時間の設定に対応
+- 変化のないログの再利用と、テンプレートで使わない進捗データの保持削減により、
+  watch の処理速度とメモリ使用量を改善
+- 書き込み時の出力先ロックを自動化。watch は停止までロックを保持し、同じ出力先への
+  他の ccxlog 実行による書き込みを防止
+- Codex の `/rename` で設定した名前を `%SessionName%` に反映
+
 ### 1.5.0
 #### 2026/07/29(火)
 - `claude.includeSidechain: true` で、新しめの Claude Code が

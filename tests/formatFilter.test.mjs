@@ -1,8 +1,3 @@
-// ソース別の形式判定（§形式判定・v1.5.0）: 拡張子 .jsonl 以外を読まないのと
-// 同じ考え方で、ClaudeCode の取得では Codex 形式のファイルを、Codex の取得では
-// ClaudeCode 形式のファイルを除外する。どちらでもない jsonl は両方から除外。
-// 実益: バックアップのように cc/cx のファイルが混在し得るディレクトリを
-// 両ソースの extraLogDirs に指定しても、各自が自分の形式だけを取り込む。
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -62,7 +57,6 @@ test('the same mixed dir can be listed in both sources; each takes its own forma
   const md = read(path.join(ws.out, 'ccxlog.md'));
   assert.match(md, /claude-only question/);
   assert.match(md, /codex-only question/);
-  // 各質問はそれぞれ1回だけ（相手側取得で二重に入らない）
   assert.equal((md.match(/claude-only question/g) ?? []).length, 1);
   assert.equal((md.match(/codex-only question/g) ?? []).length, 1);
 });

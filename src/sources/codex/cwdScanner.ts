@@ -2,80 +2,99 @@ import { forEachLine } from '../../lib/lineStream.js';
 import {
   canonicalPath, canonicalPathString, fileSnapshot, isPathWithin, sameSnapshot,
 } from '../../lib/pathUtils.js';
+import type { PathDep } from '../../lib/pathUtils.js';
 import { extractCodexCwdRecord } from './jsonlReader.js';
-import type { DiscoveredFile, FilterContext } from '../adapter.js';
+import type { DiscoveredFile, FilterContext, PrefilterResult } from '../adapter.js';
 
 const PREFILTER_CONCURRENCY = 8;
 
-// Codex cwd プリフィルタ（R1 cx1 の構造的最適化を R2 で安全化・統合し、
-// R3 で両系統の安全策を合流、R4 で走査と判定の責務を分離した最終形）。
+// Codex cwd prefilter.
 //
-// Codex は全プロジェクトのログを共有ツリー（~/.codex/sessions）に混在させる
-// ため、従来は無関係プロジェクトのファイルまで全パースしていた。ここでは
-// cwd を持つ行（session_meta / turn_context）だけを軽く走査し、「この
-// プロジェクトに属し得ない」ファイルを全パース前に除外する。
+// Codex mixes the logs of every project into one shared tree
+// (~/.codex/sessions), so ccxlog used to fully parse files belonging to
+// unrelated projects. Here we cheaply scan only the lines that carry a cwd
+// (session_meta / turn_context) and exclude files that CANNOT belong to this
+// project before the full parse.
 //
-// 構造: 走査（scanCodexCwds → CwdScanResult）と判定（mayBelong）を分離する。
-// mayBelong へは scanner を注入できる（既定は scanCodexCwds）。注入は
-// テスト容易性のため（走査失敗や「走査完了〜走査後照合」間の追記を、実走査を
-// 保ったまま決定的に再現できる）。特定タイミングのフックは本番 API に置かない。
+// Structure: scanning (scanCodexCwds -> CwdScanResult) is separated from the
+// verdict (mayBelong). A scanner can be injected into mayBelong (default
+// scanCodexCwds) purely for testability — it lets tests reproduce a scan
+// failure, or an append landing between "scan finished" and "post-scan
+// re-check", deterministically and over the real code path. No
+// timing-specific hook belongs in the production API.
 //
-// 安全設計（除外して良いのは「確実に属さない」ファイルだけ）:
-// - 明示 extraLogDirs 配下は既存契約どおり無条件で残す（§5.2）。
-// - cwd 抽出は通常リーダーと共有の extractCodexCwdRecord() を使う（形式知識の
-//   一元化。将来の形式変更で片方だけ更新される事故を防ぐ）。
-// - cwd を1つも持たないファイルは除外せず「通常解析へフォールバック」する
-//   （挙動はプリフィルタ導入前と完全一致に保たれる）。
-// - 未知レコード型が payload.cwd らしき文字列を持っていた場合も除外しない
-//   （unknownFormat ガード）。将来 Codex が cwd を持つ新レコード型を導入した
-//   時、その cwd がここで認識できなくても「除外」側へ倒れない。
-//   既知の限界: cwd が payload 直下以外（レコードのトップレベルや深い入れ子
-//   等）に置かれた未知形式はこのガードでも検出できない。その場合でも、当該
-//   ファイルに既知形式の cwd が1つも無ければ「cwd 未観測」としてフォール
-//   バックされるため、既知形式の無関係 cwd と未知形式の対象 cwd が同居する
-//   ファイルだけが理論上の残存リスクになる。
-// - 走査が I/O エラー等で失敗したファイルも除外せず通常解析へフォールバック
-//   する（一時的な読み取り失敗でセッションが出力から消えたり、プリフィルタ段
-//   で CLI 全体が落ちたりしない）。
-// - 走査の前後で snapshot（size/mtime/dev/ino）を照合し、走査中に追記・置換
-//   されたファイルは除外せず通常解析へフォールバックする（ライブ追記の窓:
-//   無関係 cwd だけを読んだ直後に対象 cwd のターンが追記されるケースを救済）。
-//   既知の限界: 同一 inode のまま同サイズで書き換え、かつ mtime を元の値へ
-//   復元する in-place 改変は snapshot 照合では検出できない（4属性がすべて
-//   一致してしまう理論経路）。塞ぐには走査対象バイト列の指紋比較等が必要で、
-//   全ファイルの追加読みは本プリフィルタの高速化効果を打ち消すため採らない。
-//   通常のログ書き込み（追記）でこの改変は発生せず、発生させるには mtime を
-//   意図的に復元する外部操作が要る（設計判断。SPEEDUP-NOTES §7 にも記載）。
-// - 走査は高速化済みの共通リーダー forEachLine（8MB チャンク）を使い、属する
-//   cwd を見つけた時点で読み込みを中断する（early-return。対象プロジェクト
-//   自身のファイルは大抵1行目の session_meta で確定するため、「属する
-//   ファイルの二度読み」がほぼ消える）。
+// Safety design (a file may be excluded only when it definitely does not
+// belong):
+// - Anything under an explicit extraLogDirs root is kept unconditionally, per
+//   the existing trust contract (§5.2).
+// - cwd extraction goes through extractCodexCwdRecord(), shared with the normal
+//   reader, so format knowledge lives in one place and a future format change
+//   cannot update only one of the two.
+// - A file with no cwd at all is not excluded; it falls back to normal
+//   analysis, keeping behaviour exactly as it was before the prefilter existed.
+// - A file is also not excluded when an unknown record type carried something
+//   that looks like a payload.cwd (the unknownFormat guard). If Codex later
+//   introduces a new cwd-bearing record type, failing to recognise its cwd here
+//   must not fail toward exclusion.
+//   Known limit: an unknown format that puts cwd somewhere other than directly
+//   under payload (at the record's top level, or deeply nested) escapes this
+//   guard. Even then, a file with no known-format cwd falls back as "no cwd
+//   observed", so the only residual risk is a file mixing known-format
+//   unrelated cwds with an unknown-format matching cwd.
+// - A file whose scan failed (I/O error and the like) is not excluded either
+//   and falls back to normal analysis, so a transient read failure neither
+//   drops a session from the output nor crashes the whole CLI at the prefilter
+//   stage.
+// - The snapshot (size/mtime/dev/ino) is compared before and after the scan; a
+//   file appended to or replaced mid-scan is not excluded but falls back. This
+//   covers the live-append window where a turn for the target project is
+//   appended right after we read only unrelated cwds.
+//   Known limit: an in-place edit that keeps the same inode and size and
+//   restores the original mtime defeats the snapshot comparison (all four
+//   attributes match). Closing it would need something like a fingerprint of
+//   the scanned bytes, and reading every file in full would cancel out the
+//   speedup this prefilter exists for. Ordinary log writing (appending) never
+//   produces such an edit; producing one takes deliberate external mtime
+//   restoration. Design decision, also recorded in SPEEDUP-NOTES §7.
+// - The scan uses the optimised shared reader forEachLine (8MB chunks) and
+//   stops as soon as a belonging cwd is found (early return). A file of the
+//   target project itself is usually settled by the session_meta on line 1, so
+//   "reading a belonging file twice" nearly disappears.
 
-// realpath を伴う正式判定（filterSession の wanted() と同一ロジック）。
-async function cwdBelongs(rawCwd: string, ctx: FilterContext): Promise<boolean> {
-  const canon = await canonicalPath(rawCwd);
+// Does an already-canonicalised cwd belong? Same logic as filterSession's
+// decision. Equal `canon` implies an equal result: wantedCwds,
+// includeSubdirectories and canonicalProjectPath are all part of the
+// incremental re-parse cache's fingerprint, so a change to any of them throws
+// the whole cache away. That is why reusing an exclusion outcome only has to
+// ask "is canon the same as last cycle?".
+function canonBelongs(canon: string, ctx: FilterContext): boolean {
   if (ctx.wantedCwds.has(canon)) return true;
   return ctx.includeSubdirectories && isPathWithin(canon, ctx.canonicalProjectPath);
 }
 
-// realpath を伴わない同期の予備判定。true なら「属する」と即断して走査を
-// 打ち切ってよい（残す側の誤検出は無害 — 後段の filterSession が最終判定
-// する）。false でも除外はせず、走査完了後に cwdBelongs（realpath あり）で
-// 精密に再判定する。シンボリックリンク等で文字列表現が食い違うケースは
-// この再判定側が拾う。
+// A synchronous preliminary check that skips realpath. When it returns true the
+// file belongs and the scan may stop right there (a false positive on the KEEP
+// side is harmless — filterSession makes the final call). A false never
+// excludes: after the scan finishes, cwdBelongs (with realpath) decides
+// precisely, which is what catches cases where symlinks make the string forms
+// disagree.
 function quickBelongs(rawCwd: string, ctx: FilterContext): boolean {
   const canon = canonicalPathString(rawCwd);
   if (ctx.wantedCwds.has(canon)) return true;
   return ctx.includeSubdirectories && isPathWithin(canon, ctx.canonicalProjectPath);
 }
 
-// 走査結果の明示的な境界。mayBelong の判定材料はこの4値で全部。
-// - cwds: 観測した cwd（既知形式のレコード由来のみ。matchedFast 時は途中まで）
-// - recognized: 既知形式のレコード（session_meta / turn_context）を観測したか
-//   （本番の残す/除外の判定は cwds の有無と unknownFormat で行う。recognized は
-//    テスト・診断用の観測情報で、判定には現在使っていない）
-// - unknownFormat: 未知レコード型が payload.cwd らしき文字列を持っていたか
-// - matchedFast: quickBelongs で「属する」と即断し走査を打ち切ったか
+// The explicit boundary of a scan result: these four values are everything
+// mayBelong decides on.
+// - cwds: the cwds observed (from known-format records only; truncated when
+//   matchedFast)
+// - recognized: whether a known-format record (session_meta / turn_context) was
+//   seen. The production keep/exclude decision uses the presence of cwds and
+//   unknownFormat; recognized is observational, for tests and diagnostics, and
+//   is currently not part of the verdict.
+// - unknownFormat: whether an unknown record type carried a payload.cwd-looking
+//   string
+// - matchedFast: whether quickBelongs settled "belongs" and cut the scan short
 export interface CwdScanResult {
   cwds: string[];
   recognized: boolean;
@@ -83,10 +102,11 @@ export interface CwdScanResult {
   matchedFast: boolean;
 }
 
-// 1ファイルを軽量走査して cwd 情報だけを集める（残す/除外の判定はしない）。
-// 通常リーダーと同じ forEachLine・同じ形式知識（extractCodexCwdRecord）を使う。
-// I/O エラーはそのまま呼び出し側へ伝播させる（ここでは握り潰さない。
-// フォールバック判断は mayBelong の責務）。
+// Lightly scan one file for cwd information only (it makes no keep/exclude
+// decision). Uses the same forEachLine and the same format knowledge
+// (extractCodexCwdRecord) as the normal reader. I/O errors propagate to the
+// caller rather than being swallowed here — deciding to fall back is
+// mayBelong's job.
 export async function scanCodexCwds(
   filePath: string,
   ctx: FilterContext,
@@ -96,15 +116,16 @@ export async function scanCodexCwds(
   let unknownFormat = false;
   let matchedFast = false;
   await forEachLine(filePath, (line) => {
-    // 大半の行は cwd を持たない。部分文字列ゲートで JSON.parse を回避する
-    // （cwd キーを持つ JSON 行は必ず '"cwd"' を含む）。
+    // Most lines carry no cwd. A substring gate avoids JSON.parse for them
+    // (a JSON line with a cwd key always contains '"cwd"').
     if (!line.includes('"cwd"')) return;
     let event: unknown;
     try { event = JSON.parse(line); } catch { return; }
     const record = extractCodexCwdRecord(event);
     if (!record.recognized) {
-      // 未知レコード型に payload.cwd らしき文字列 → 将来形式の可能性が
-      // あるため「除外して良い根拠」を放棄する（unknownFormat ガード）。
+      // An unknown record type with a payload.cwd-looking string may be a
+      // future format, so we give up the grounds for excluding this file
+      // (the unknownFormat guard).
       const payload = (event as Record<string, unknown>).payload;
       if (payload && typeof payload === 'object'
         && typeof (payload as Record<string, unknown>).cwd === 'string') {
@@ -116,7 +137,7 @@ export async function scanCodexCwds(
     if (!record.cwd) return;
     if (quickBelongs(record.cwd, ctx)) {
       matchedFast = true;
-      return false;   // early-return: 属すると確定したので残りは読まない
+      return false;   // early return: it belongs, so the rest is not read
     }
     cwds.add(record.cwd);
     return;
@@ -126,65 +147,94 @@ export async function scanCodexCwds(
 
 export type CwdScanner = typeof scanCodexCwds;
 
-// 1ファイルがこのプロジェクトに属し得るか。false を返して良いのは
-// 「cwd を1つ以上観測し、そのどれもがプロジェクトに属さず、かつ走査中に
-// ファイルが変化していない」場合だけ。
-// scanner は注入可能（既定 = scanCodexCwds）。テストは実走査を包むラッパーを
-// 渡すことで、走査失敗や「実走査完了〜走査後照合」間の追記を実経路のまま
-// 決定的に再現できる。
+/**
+ * The prefilter verdict for one file.
+ * - `{ keep: true }`: do not exclude (it may belong, or there is not enough to
+ *   decide on).
+ * - `{ keep: false, cwdDeps }`: exclude. `cwdDeps` lists the "raw cwd -> this
+ *   cycle's canonical resolution" pairs the exclusion rested on. The
+ *   incremental re-parse cache re-verifies those resolutions to decide whether
+ *   `prefiltered` may be reused next cycle, which is how a re-pointed link
+ *   target is detected (see analysisCache.ts).
+ */
+export type PrefilterVerdict =
+  | { keep: true; cwdDeps?: undefined }
+  | { keep: false; cwdDeps: PathDep[] };
+
+const KEEP: PrefilterVerdict = { keep: true };
+
+// Can this file belong to the project? `keep: false` is allowed only when at
+// least one cwd was observed, none of them belongs to the project, and the file
+// did not change during the scan.
+// The scanner is injectable (default scanCodexCwds) so tests can wrap the real
+// scan and deterministically reproduce a scan failure, or an append landing
+// between "real scan finished" and "post-scan re-check", over the real path.
 export async function mayBelong(
   file: DiscoveredFile,
   ctx: FilterContext,
   scanner: CwdScanner = scanCodexCwds,
-): Promise<boolean> {
-  // 明示ルートは cwd を見ずに必ず残す（§5.2 の信頼契約）。
-  if (file.root.origin === 'extra') return true;
-  // 走査前 snapshot。取れないファイル（走査直前に消えた等）は判定せず残す
-  // （通常解析側が従来どおりのエラー処理をする）。
+): Promise<PrefilterVerdict> {
+  // An explicit root is always kept without looking at cwd (the §5.2 trust contract).
+  if (file.root.origin === 'extra') return KEEP;
+  // Pre-scan snapshot. A file we cannot stat (removed just before the scan, say)
+  // is kept undecided, leaving normal analysis to handle it as it always has.
   const before = await fileSnapshot(file.filePath);
-  if (!before) return true;
+  if (!before) return KEEP;
   let scan: CwdScanResult;
   try {
     scan = await scanner(file.filePath, ctx);
   } catch {
-    // 走査失敗（I/O エラー等）→ 除外せず通常解析へフォールバック。
-    // ここで catch しないと Promise.all 経由で CLI 全体が異常終了する。
-    return true;
+    // Scan failure (I/O error and the like) -> do not exclude, fall back to
+    // normal analysis. Without this catch, Promise.all would abort the whole CLI.
+    return KEEP;
   }
-  if (scan.matchedFast) return true;
-  // 走査後 snapshot 照合: 走査中に追記・置換されたファイルは、走査結果
-  // （無関係 cwd しか見ていない）が既に古い可能性があるため除外しない。
-  // matchedFast の early-return 側は「残す」判定なので照合不要。
+  if (scan.matchedFast) return KEEP;
+  // Post-scan snapshot check: a file appended to or replaced during the scan may
+  // already have outgrown a scan result that saw unrelated cwds only, so it is
+  // not excluded. The matchedFast early return needs no check — it keeps the file.
   const after = await fileSnapshot(file.filePath);
-  if (!after || !sameSnapshot(before, after)) return true;
-  // cwd が1つも無い（未知形式を含む）→ 除外せず通常解析へフォールバック。
-  // 従来パスでも属否判定は cwd に依存するため、挙動は導入前と一致する。
-  if (scan.unknownFormat || scan.cwds.length === 0) return true;
+  if (!after || !sameSnapshot(before, after)) return KEEP;
+  // No cwd at all (including unknown formats) -> do not exclude, fall back to
+  // normal analysis. The legacy path also decides belonging from cwd, so
+  // behaviour matches the pre-prefilter version.
+  if (scan.unknownFormat || scan.cwds.length === 0) return KEEP;
+  // Only when excluding do we carry back the resolutions the decision used
+  // (a file settled as belonging cuts the scan short, so there is no dependency
+  // worth recording on the `keep: true` side).
+  const cwdDeps: PathDep[] = [];
   for (const cwd of scan.cwds) {
-    if (await cwdBelongs(cwd, ctx)) return true;
+    const canon = await canonicalPath(cwd);
+    if (canonBelongs(canon, ctx)) return KEEP;
+    cwdDeps.push({ raw: cwd, canon });
   }
-  return false;
+  return { keep: false, cwdDeps };
 }
 
-// 並列度を制限してファイルシステム読みを重ね合わせる（無制限にファイルを
-// 開かない）。結果は index 書き込みで発見順を維持し、下流の決定的な出力
-// 順序を保つ。
+// Overlap filesystem reads under a concurrency limit rather than opening every
+// file at once. Results are written by index so discovery order survives,
+// preserving the deterministic output order downstream.
 export async function prefilterCodexFiles(
   files: DiscoveredFile[],
   ctx: FilterContext,
-): Promise<DiscoveredFile[]> {
-  // 初期値は「残す」側（true）。worker が全 index を埋めるため通常は必ず
-  // 上書きされるが、万一の未設定時にも除外側へ倒れない既定にしておく。
-  const keep = new Array<boolean>(files.length).fill(true);
+): Promise<PrefilterResult> {
+  // Initialised to the KEEP side. Workers fill every index so this is normally
+  // overwritten, but should one ever be missed the default must not fail toward
+  // exclusion.
+  const verdicts = new Array<PrefilterVerdict>(files.length).fill(KEEP);
   let next = 0;
   const worker = async (): Promise<void> => {
     while (true) {
       const index = next++;
       if (index >= files.length) return;
-      keep[index] = await mayBelong(files[index], ctx);
+      verdicts[index] = await mayBelong(files[index], ctx);
     }
   };
   const count = Math.min(PREFILTER_CONCURRENCY, files.length);
   await Promise.all(Array.from({ length: count }, () => worker()));
-  return files.filter((_, index) => keep[index]);
+  const excludedCwdDeps = new Map<string, PathDep[]>();
+  files.forEach((f, index) => {
+    const v = verdicts[index];
+    if (!v.keep) excludedCwdDeps.set(f.filePath, v.cwdDeps);
+  });
+  return { passed: files.filter((_, index) => verdicts[index].keep), excludedCwdDeps };
 }

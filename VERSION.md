@@ -1,8 +1,18 @@
 # ccxlog
 
-**Language:** [Japanese/日本語](VERSION_Japanese.md)
+**Language:** [Japanese](VERSION_Japanese.md)
 
 ## Version
+
+### 1.6.0
+#### 2026/08/03(Mon)
+- add `--watch` for continuous updates, with optional duration
+  (`--watch=8h`) and configurable wait time (`watchIntervalSeconds`)
+- speed up watch cycles by reusing unchanged log data and reducing retained
+  progress data when the template does not use it
+- automatically lock the output during writes; watch holds the lock until it
+  stops, preventing other ccxlog runs from writing to the same output
+- show Codex names assigned with `/rename` in `%SessionName%`
 
 ### 1.5.0
 #### 2026/07/29(Tue)

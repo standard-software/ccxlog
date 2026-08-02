@@ -30,6 +30,14 @@ export function hasBothProgress(tpl: string): boolean {
   return tpl.includes(PROGRESS_FULL_PLACEHOLDER) && tpl.includes(PROGRESS_PLACEHOLDER);
 }
 
+// Does the template reference Progress at all? If it does not, the data behind
+// Progress is never kept in memory in the first place (lib/progressData.ts).
+// '%ProgressFull%' does not contain '%Progress%' (the closing '%' differs), so
+// both are checked explicitly.
+export function templateUsesProgress(tpl: string): boolean {
+  return tpl.includes(PROGRESS_PLACEHOLDER) || tpl.includes(PROGRESS_FULL_PLACEHOLDER);
+}
+
 export function templateHasSource(tpl: string): boolean {
   return tpl.includes('%Source%');
 }

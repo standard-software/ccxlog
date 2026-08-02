@@ -1,6 +1,7 @@
-// §8.1 smart-write lifecycle: noop -> append -> rewrite。
-// v1.4.0 R2: 自動バックアップが付くのは ccxlogid が失われる rewrite のみ
-// （挿入・テンプレート変更など ID が保たれる rewrite はバックアップなし）。
+// §8.1 smart-write lifecycle: noop -> append -> rewrite.
+// v1.4.0 R2: an automatic backup is attached only to a rewrite that loses a
+// ccxlogid (a rewrite preserving every id — an insertion, a template change —
+// takes no backup).
 // Ported from old-develop output.test.mjs, adapted to new-develop wording.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -48,7 +49,6 @@ test('inserting an earlier pair rewrites WITHOUT a backup (all ids preserved, R2
     claudeQA(ws.project, { uuid: 'a', ts: '2026-05-27T10:00:00.000Z', q: 'earlier' }));
   const r = run([ws.project, '--out', ws.out, '-cc'], { home: ws.home });
   assert.match(r.stdout, /\[rewrite\]/);
-  // 途中挿入は既存 ccxlogid を 1 つも失わないので自動バックアップなし。
   assert.doesNotMatch(r.stdout, /Backed up/);
   assert.equal(exists(path.join(ws.out, 'backup_CCXLOG_md_auto')), false);
   const md = read(path.join(ws.out, 'cclog.md'));
@@ -84,7 +84,6 @@ test('changing only the template rewrites WITHOUT a backup (ids preserved, R2)',
   writeConfig(ws.out, { claude: { extraLogDirs: [ws.ccLogs] }, template: 'templates/alt.md' });
   const r = run([ws.project, '--out', ws.out, '-cc'], { home: ws.home });
   assert.match(r.stdout, /\[rewrite\]/);
-  // テンプレート変更でも ccxlogid は全て保たれるので自動バックアップなし。
   assert.doesNotMatch(r.stdout, /Backed up/);
   assert.equal(exists(path.join(ws.out, 'backup_CCXLOG_md_auto')), false);
   assert.match(read(path.join(ws.out, 'cclog.md')), /Q: stable/);

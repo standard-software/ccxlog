@@ -146,5 +146,5 @@ test('bundled japanese template keeps %Source% tokens and renders headings', t =
   assert.match(md, /\[ClaudeCode\]/);
   assert.doesNotMatch(md, /^Source=ClaudeCode/m);
   assert.match(md, /^Model=claude-opus-4-8 Version=/m);
-  assert.match(md, /## 質問/);
+  assert.match(md, /## \u8cea\u554f/);
 });

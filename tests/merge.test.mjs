@@ -23,8 +23,6 @@ function mkPair(o = {}) {
     model: '', version: '', gitBranch: '', cwd: '',
     tokens: {},
     ccxid: '',
-    // fileContentHash は UnifiedPair 上で遅延・非同期アクセサになった。
-    // テストはオプションで素の文字列を渡し、ここでラップする。
     fileContentHash: async () => o.fileContentHash ?? '',
     eventIdStream: o.eventIdStreamHash ?? [],
   };

@@ -7,23 +7,22 @@ export interface CodexReadResult {
   entries: LogEntry[];
   skippedLines: number;
   fileSize: number;
-  formatRecognized: boolean;   // Codex rollout 形式のレコードを1つでも観測したか（§形式判定・v1.5.0）
-  fileContentHash: () => Promise<string>;   // 遅延・メモ化（§6.3 完全コピー確認用）
+  formatRecognized: boolean;   // was a Codex rollout record seen? (§format detection, v1.5.0)
+  fileContentHash: () => Promise<string>;   // lazy + memoised (§6.3 complete-copy check)
   eventIdStream: string[];
   sessionId: string;
   sessionCwd: string;
   sessionName: string;
 }
 
-// Codex rollout の1レコードから cwd を取り出す。cwd を持ち得るのは
-// session_meta と turn_context の payload.cwd のみ、という形式知識は
-// この関数だけが持つ。通常リーダー（readJsonl）とプリフィルタ
-// （cwdScanner）の両方がこれを使うことで、将来 Codex のログ形式が
-// 変わった時に片方だけ更新されて正当なログが除外される事故を防ぐ
-// （R1 レポート指摘: 形式知識の二重化解消）。
-// recognized=false は「この関数が知らないレコード型」を意味し、プリフィルタ
-// 側では除外の根拠にせず通常解析へフォールバックする材料になる
-// （cwdScanner.ts の unknownFormat ガードを参照）。
+// Extract the cwd from one Codex rollout record. The format knowledge that only
+// session_meta and turn_context can carry one, in payload.cwd, lives in this
+// function alone. Both the normal reader (readJsonl) and the prefilter
+// (cwdScanner) go through it, so a future change to Codex's log format cannot
+// update just one of them and start excluding legitimate logs.
+// recognized=false means "a record type this function does not know"; the
+// prefilter must not treat it as grounds for exclusion and falls back to normal
+// analysis (see the unknownFormat guard in cwdScanner.ts).
 export function extractCodexCwdRecord(event: unknown): { recognized: boolean; cwd?: string } {
   const e = raw(event);
   if (e.type !== 'session_meta' && e.type !== 'turn_context') {
@@ -90,13 +89,13 @@ function isFallbackNoise(value: string): boolean {
 // user message). We therefore accept ONLY a `msg_`-prefixed `payload.id` — the
 // message item's own id — as a resend key:
 //   - `event.id` (the rollout LINE wrapper) is rejected: its per-item uniqueness
-//     is unverified and it is absent in observed logs (r5 report, cx5 §悪い点).
+//     is unverified and it is absent in observed logs (r5 report, cx5 weaknesses).
 //   - a `payload.id` that does NOT match the known message-item id form is
 //     rejected, so a future/foreign non-unique parent or turn id placed there can
 //     never be mistaken for a per-item id and drop a genuine question.
 // When no verified id is present — the real-world case for user messages — this
 // returns '' and the caller keeps the message, honoring the spec's
-// "確定できなければ残す" (§6.2).
+// "keep it unless you can prove otherwise" rule (§6.2).
 function verifiedUserMessageId(payload: Raw): string {
   const id = text(payload.id);
   return id.startsWith('msg_') ? id : '';
@@ -121,7 +120,8 @@ function usageDelta(info: Raw, prevTotal: Raw | null): Raw | null {
   // FIRST report: the delta from a zero baseline IS the whole cumulative total,
   // which may already cover several API calls made before this notification.
   // Crediting last_token_usage here (only the most recent call) undercounts, so
-  // adopt the cumulative total (§6.2 "累積 total_token_usage の差分で計上").
+  // adopt the cumulative total (§6.2: "count from the delta of the cumulative
+  // total_token_usage").
   if (!prevTotal) return totalRaw;
   const reset = USAGE_FIELDS.some(k =>
     typeof totalRaw[k] === 'number'
@@ -217,10 +217,10 @@ export async function readJsonl(filePath: string, includeDeveloperMessages = fal
     fallbackUsers = [];
   };
 
-  // Codex rollout と認識できる条件: rollout のレコード型（session_meta /
-  // turn_context / event_msg / response_item）を1つでも観測すること。1つも
-  // 無いファイル（Claude セッションログや無関係の jsonl）はソース不一致として
-  // 取り込み対象から外す（§形式判定・v1.5.0）。
+  // What makes a file recognisable as a Codex rollout: at least one rollout
+  // record type (session_meta / turn_context / event_msg / response_item). A file
+  // with none (a Claude session log, or an unrelated jsonl) is left out as a
+  // source mismatch (§format detection, v1.5.0).
   let formatRecognized = false;
   await forEachLine(filePath, (line) => {
     if (!line.trim()) return;
@@ -234,7 +234,8 @@ export async function readJsonl(filePath: string, includeDeveloperMessages = fal
     if (event.type === 'session_meta') {
       sessionId = text(payload.session_id) || text(payload.id) || sessionId;
       sessionName = text(payload.session_name) || text(payload.title) || sessionName;
-      // cwd の抽出は共有関数（extractCodexCwdRecord）経由 — プリフィルタと同一知識。
+      // cwd extraction goes through the shared function (extractCodexCwdRecord),
+      // so the prefilter works from identical format knowledge.
       sessionCwd = extractCodexCwdRecord(event).cwd || sessionCwd;
       cwd = sessionCwd;
       version = text(payload.cli_version) || version;
@@ -304,9 +305,11 @@ export async function readJsonl(filePath: string, includeDeveloperMessages = fal
         // every message, even identical content at an identical timestamp, since
         // it may be a genuine repeated question (same text typed twice in the same
         // millisecond) and a resend and a real repeat are indistinguishable
-        // without an id. This is the conservative "確定できなければ残す" of §6.2,
-        // and never prunes on the ambiguous (timestamp, content) key (r5 report:
-        // A の欠陥 = 正当な別発話の欠落 / B 方式 = ID ありのみ除外).
+        // without an id. This is the conservative "keep it unless you can prove
+        // otherwise" of §6.2, and never prunes on the ambiguous
+        // (timestamp, content) key (r5 report: approach A's flaw was dropping a
+        // legitimately distinct utterance; approach B excludes only when an id
+        // is present).
         if (value && !isFallbackNoise(value)) {
           const stableId = verifiedUserMessageId(payload);
           if (!stableId || !fallbackStableIds.has(stableId)) {
@@ -350,9 +353,9 @@ export async function readJsonl(filePath: string, includeDeveloperMessages = fal
   // question emitted, so flush any pending fallbacks now (§6.2).
   flushFallback();
 
-  // 生の "type id" 文字列列: strictPrefix() は要素等価比較なので、生文字列は
-  // 旧実装の要素毎 SHA-256 と全く同じ判別力を持つ。エントリ毎の暗号学的
-  // ハッシュ代を払わない。
+  // Raw "type id" strings: strictPrefix() compares elements for equality, so raw
+  // strings discriminate exactly as well as the old per-element SHA-256 without
+  // paying for a cryptographic hash per entry.
   const eventIdStream = entries.map(e => {
     const uuid = (e as { uuid?: unknown }).uuid;
     const id = typeof uuid === 'string' ? uuid : '';

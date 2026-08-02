@@ -2,13 +2,18 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { setTimeout as delay } from 'node:timers/promises';
 import { createRequire } from 'node:module';
 import { parseArgs } from './lib/cli.js';
 import { loadConfig, PACKAGE_ROOT, CONFIG_FILE_NAME, type CcxlogConfig } from './lib/config.js';
-import { canonicalPath, canonicalPathString, fileIdentity, isPathWithin } from './lib/pathUtils.js';
+import {
+  canonicalPath, canonicalPathString, clearCanonicalPathCache, fileIdentity, isPathWithin,
+} from './lib/pathUtils.js';
+import type { PathDep } from './lib/pathUtils.js';
 import { assignCcxids, safeSessionId } from './lib/identity.js';
 import { compareUnifiedPairs, dedupePairs, dedupeForkedSessions } from './lib/merge.js';
 import { hasBothProgress, templateHasSource, unknownPlaceholders } from './lib/templates.js';
+import { progressDataNeeded } from './lib/progressData.js';
 import {
   toUnifiedPair,
   formatPair,
@@ -29,9 +34,20 @@ import {
   type JsonlBackupItem,
 } from './lib/backup.js';
 import { acquireLock, releaseLock, type LockHandle } from './lib/lock.js';
+import { collectingSink, consoleSink, type OutputSink } from './lib/outputSink.js';
+import {
+  cacheKey, createAnalysisCache,
+  type AnalysisCache, type CachedFile,
+} from './lib/analysisCache.js';
+import { DEFAULT_INTERVAL_SECONDS } from './lib/watchArgs.js';
+import {
+  createWatchLoop, emptyWriteCounts, formatSummary,
+  type WatchCycleResult, type WriteCounts, type WriteKind,
+} from './lib/watchRunner.js';
+import { createWarningReporter, type WarningReporter } from './lib/watchWarnings.js';
 import { claudeAdapter } from './sources/claude/index.js';
 import { codexAdapter } from './sources/codex/index.js';
-import type { SourceAdapter, RootRef, DiscoveredFile, SessionData } from './sources/adapter.js';
+import type { SourceAdapter, RootRef, DiscoveredFile, SessionData, FilterContext } from './sources/adapter.js';
 import type { CliOptions, UnifiedPair, SourceMode } from './lib/types.js';
 
 const PKG_VERSION = (createRequire(import.meta.url)('../package.json') as { version: string }).version;
@@ -40,19 +56,61 @@ const EXIT_OK = 0;
 const EXIT_RUNTIME = 1;
 const EXIT_USAGE = 2;
 
+// The result of one cycle (= one classic single run). The watch loop uses it
+// for reporting and totals (§5.2). The output destination is passed as an
+// argument to `run()` (an OutputSink) rather than being a module global: a
+// single run keeps plain console (behaviour identical to before), while watch
+// by default discards the detailed output and narrows it to one line per cycle
+// that actually changed something (watch-spec §9.1).
+interface RunOutcome {
+  code: number;
+  pairs: number;
+  writes: WriteCounts;
+  changed: boolean;
+  changeLine?: string;
+  writeLabel: string;
+  failure?: string;
+  intervalSeconds: number;
+}
+
+function outcome(fields: Partial<RunOutcome> & { code: number }): RunOutcome {
+  return {
+    pairs: 0,
+    writes: emptyWriteCounts(),
+    changed: false,
+    writeLabel: 'none',
+    intervalSeconds: DEFAULT_INTERVAL_SECONDS,
+    ...fields,
+  };
+}
+
+const WRITE_KINDS: WriteKind[] = ['create', 'append', 'rewrite', 'noop'];
+
+// A summary listing only the non-zero write kinds: `append` for a single kind
+// with one file, `1 create, 2 append` for several (used by the --verbose cycle
+// and cycle-result lines).
+function describeWrites(w: WriteCounts, kinds: WriteKind[] = WRITE_KINDS): string {
+  const present = kinds.filter(k => w[k] > 0);
+  if (present.length === 0) return 'none';
+  if (present.length === 1 && w[present[0]] === 1) return present[0];
+  return present.map(k => `${w[k]} ${k}`).join(', ');
+}
+
 function adaptersForMode(mode: SourceMode): SourceAdapter[] {
   if (mode === 'claude') return [claudeAdapter];
   if (mode === 'codex') return [codexAdapter];
   return [claudeAdapter, codexAdapter];
 }
 
-// v1.5.0: かつてここに「outDir 配下と backup_jsonl / backup_CCXLOG_md / templates
-// という名前のディレクトリを探索から除外する」保護があったが、撤廃した。
-// 根拠: (1) .md 系ディレクトリに .jsonl は存在せず除外は無意味 (2) 標準探索の
-// ルート（~/.claude / ~/.codex）配下にバックアップは現れない (3) extraLogDirs は
-// ユーザーの明示指定＝そこを読むのが意図どおり。実害だった「--backup-jsonl の
-// 自己増殖」は、探索側ではなくバックアップのコピー元選定で自分のコピー先を
-// 除外することで防ぐ（backupJsonl() を参照）。
+// v1.5.0: this used to hold a guard that excluded everything under outDir, plus
+// any directory named backup_jsonl / backup_CCXLOG_md / templates, from
+// discovery. It was removed because (1) the .md backup directories contain no
+// .jsonl, so excluding them achieved nothing, (2) backups never appear under the
+// standard roots (~/.claude / ~/.codex), and (3) extraLogDirs is an explicit
+// user choice, so reading it is exactly the intent. The one real problem —
+// `--backup-jsonl` copying its own output back into itself — is prevented on the
+// backup side by excluding the copy destination when choosing sources (see
+// backupJsonl()), not on the discovery side.
 
 // Transient OS errors that a retry can clear. Under load (many concurrent runs,
 // antivirus scans, FD exhaustion) readdir/stat can briefly fail with these even
@@ -90,6 +148,7 @@ async function walkJsonl(
   dir: string,
   recursive: boolean,
   visited: Set<string>,
+  out: OutputSink,
 ): Promise<string[]> {
   let entries: Array<{ name: string; isDirectory(): boolean; isFile(): boolean }>;
   try {
@@ -99,7 +158,7 @@ async function walkJsonl(
     // "not found" so a truly unreadable root is visible rather than silent.
     const code = (e as NodeJS.ErrnoException)?.code;
     if (code !== 'ENOENT' && code !== 'ENOTDIR') {
-      console.warn(`Warning: could not read directory ${dir} (${code ?? 'unknown error'}); skipping it.`);
+      out.warn(`Warning: could not read directory ${dir} (${code ?? 'unknown error'}); skipping it.`);
     }
     return [];
   }
@@ -112,7 +171,7 @@ async function walkJsonl(
       const key = id ? id.key : full;
       if (visited.has(key)) continue;
       visited.add(key);
-      results.push(...await walkJsonl(full, recursive, visited));
+      results.push(...await walkJsonl(full, recursive, visited, out));
     } else if (e.isFile() && e.name.endsWith('.jsonl')) {
       results.push(full);
     }
@@ -120,12 +179,13 @@ async function walkJsonl(
   return results;
 }
 
-// サブエージェント記録の探索（§ includeSidechain・v1.5.0）。新しめの Claude Code は
-// サブエージェントの会話を本体セッションファイル内の isSidechain エントリではなく
-// `<ルート>/<セッションID>/subagents/*.jsonl` という別ファイルに保存する。
-// includeSidechain 有効時のみ、各ルート直下のディレクトリについて subagents/ の
-// 直下だけを追加で読む（それ以深への再帰はしない。cclog と同じ到達範囲）。
-async function listSubagentJsonl(rootDir: string): Promise<string[]> {
+// Discovery of subagent transcripts (§ includeSidechain, v1.5.0). Recent Claude
+// Code versions store a subagent's conversation not as isSidechain entries
+// inside the main session file but in a separate
+// `<root>/<session id>/subagents/*.jsonl`. Only when includeSidechain is on, we
+// additionally read what sits directly under subagents/ for each directory
+// immediately below a root (no deeper recursion — the same reach as cclog).
+async function listSubagentJsonl(rootDir: string, out: OutputSink): Promise<string[]> {
   let entries: Array<{ name: string; isDirectory(): boolean; isFile(): boolean }>;
   try {
     entries = await fsRetry(() => fs.readdir(rootDir, { withFileTypes: true }));
@@ -142,7 +202,7 @@ async function listSubagentJsonl(rootDir: string): Promise<string[]> {
     } catch (err) {
       const code = (err as NodeJS.ErrnoException)?.code;
       if (code !== 'ENOENT' && code !== 'ENOTDIR') {
-        console.warn(`Warning: could not read directory ${sub} (${code ?? 'unknown error'}); skipping it.`);
+        out.warn(`Warning: could not read directory ${sub} (${code ?? 'unknown error'}); skipping it.`);
       }
       continue;
     }
@@ -153,27 +213,30 @@ async function listSubagentJsonl(rootDir: string): Promise<string[]> {
   return found;
 }
 
-async function discoverFiles(roots: RootRef[]): Promise<DiscoveredFile[]> {
+async function discoverFiles(roots: RootRef[], out: OutputSink): Promise<DiscoveredFile[]> {
   const seenPhysical = new Set<string>();
-  const out: DiscoveredFile[] = [];
+  const found: DiscoveredFile[] = [];
   for (const root of roots) {
     let st;
     try { st = await fsRetry(() => fs.stat(root.dir)); } catch { continue; }
     if (!st.isDirectory()) continue;
     const visited = new Set<string>();
-    const files = (await walkJsonl(root.dir, root.recursive, visited)).sort();
+    const files = (await walkJsonl(root.dir, root.recursive, visited, out)).sort();
     if (root.scanSubagentDirs) {
-      files.push(...(await listSubagentJsonl(root.dir)).sort());
+      files.push(...(await listSubagentJsonl(root.dir, out)).sort());
     }
     for (const f of files) {
       const id = await fileIdentity(f);
       const key = id ? id.key : f;
       if (seenPhysical.has(key)) continue;
       seenPhysical.add(key);
-      out.push({ filePath: f, root });
+      // Carry the four attributes taken at discovery time (before reading).
+      // The incremental re-parse cache decides identity from them; a file we
+      // could not stat gets undefined, which means "always re-read".
+      found.push({ filePath: f, root, snapshot: id?.snapshot });
     }
   }
-  return out;
+  return found;
 }
 
 // Validate namespace uniqueness of stableRootKeys within a source (§5.5).
@@ -193,23 +256,163 @@ interface AdapterRun {
   adapter: SourceAdapter;
   roots: RootRef[];
   files: DiscoveredFile[];
-  filesRead: number;         // プリフィルタ通過後に全パースしたファイル数（--verbose 表示用）
-  formatSkipped: string[];   // 自ソース形式でないため除外した jsonl（--verbose 表示用）
+  filesRead: number;         // files that reached analysis after the prefilter (--verbose)
+  // Incremental re-parse breakdown (--verbose). The two always sum to files.length.
+  reparsed: number;          // discovered files re-scanned and re-read (cache miss)
+  reused: number;            // discovered files taken straight from last cycle
+  formatSkipped: string[];   // jsonl excluded for not being this source's format (--verbose)
   sessions: SessionData[];   // filtered (belongs); pairs may be empty
 }
 
-async function run(opts: CliOptions): Promise<number> {
+// Fingerprint of the "premises of the analysis" that must invalidate the
+// incremental re-parse cache (analysisCache.ts). It folds in every input that
+// could make the same file analyse differently. The config goes in whole rather
+// than key by key: failing to enumerate a key that does affect analysis is worse
+// than re-reading once too often because an irrelevant key changed.
+function analysisFingerprint(config: CcxlogConfig, opts: CliOptions, ctx: FilterContext): string {
+  return JSON.stringify({
+    config,
+    // Whether Progress data was retained is itself a "same file, different
+    // analysis" condition, so it is folded in explicitly. `config` already
+    // contains the template body, making this technically redundant today; it
+    // stays a separate field so that narrowing the fingerprint later cannot
+    // reintroduce the accident of reusing a slimmed session — read during a
+    // no-reference cycle — in a cycle that does reference Progress.
+    progressRetained: progressDataNeeded(config),
+    mode: opts.mode,
+    projectPath: ctx.projectPath,
+    canonicalProjectPath: ctx.canonicalProjectPath,
+    includeSubdirectories: ctx.includeSubdirectories,
+    wantedCwds: [...ctx.wantedCwds].sort(),
+  });
+}
+
+// One cycle's analysis (discovered files -> sessions). With a `cache`, a file
+// whose four attributes match last cycle skips both the prefilter and the full
+// parse and is reused. Without a cache (a single run) the path is exactly the
+// classic one.
+async function readAdapterSessions(
+  ar: AdapterRun,
+  config: CcxlogConfig,
+  filterCtx: FilterContext,
+  cache: AnalysisCache | undefined,
+): Promise<void> {
+  // 1. Consult the cache. Only files that missed go on to the prefilter and read.
+  const hits = new Map<string, CachedFile>();
+  const misses: DiscoveredFile[] = [];
+  for (const f of ar.files) {
+    const hit = await cache?.get(cacheKey(ar.adapter.id, f), f);
+    if (hit) hits.set(f.filePath, hit); else misses.push(f);
+  }
+  ar.reused = hits.size;
+  ar.reparsed = misses.length;
+
+  // 2. The prefilter (currently implemented for Codex only) runs on the missed
+  //    files alone. A hit reuses last cycle's "cannot belong" verdict. An
+  //    excluded file also hands back the cwd resolutions its verdict depended
+  //    on, which are stored alongside the cache entry as the material for
+  //    checking next cycle whether the verdict may be reused.
+  const prefiltered = ar.adapter.prefilterFiles
+    ? await ar.adapter.prefilterFiles(misses, config, filterCtx)
+    : { passed: misses, excludedCwdDeps: new Map<string, PathDep[]>() };
+  const passedMisses = new Set(prefiltered.passed.map(f => f.filePath));
+
+  // Belonging selection (filterSession) re-runs every cycle for as long as we
+  // hold the raw session: it reads no disk, and caching it would only widen the
+  // surface the invariant must be verified across. The return value says whether
+  // the session contributed to the output and, when it did not, which cwd
+  // resolutions the verdict depended on.
+  const kept: SessionData[] = [];
+  const takeFiltered = async (s: SessionData): Promise<{ used: boolean; cwdDeps: PathDep[] }> => {
+    const { pairs, belongs, cwdDeps } = await ar.adapter.filterSession(s, config, filterCtx);
+    if (pairs.length === 0 && !belongs) return { used: false, cwdDeps: cwdDeps ?? [] };
+    kept.push({ ...s, allPairs: pairs });
+    return { used: true, cwdDeps: [] };
+  };
+
+  // 3. Process one file at a time in discovery order (so the deterministic
+  //    output order downstream is preserved). A hit reproduces last cycle's
+  //    outcome verbatim; only a miss goes on to scan and read. `SessionData` is
+  //    merely copied downstream, never mutated, so the cached instance can be
+  //    shared as is.
+  for (const f of ar.files) {
+    const key = cacheKey(ar.adapter.id, f);
+    const hit = hits.get(f.filePath);
+    if (hit) {
+      // A file the prefilter rejected was never even a candidate for the full
+      // parse, so it is not counted as fully read. Everything else did reach the
+      // full parse last cycle.
+      if (hit.outcome === 'prefiltered') continue;
+      ar.filesRead++;
+      if (hit.outcome === 'unrecognized') { ar.formatSkipped.push(f.filePath); continue; }
+      // 'dropped' means "read, but it does not belong to the target project".
+      // We hold no raw data for it, so it is skipped as not contributing to the
+      // output, exactly as last cycle.
+      if (hit.outcome === 'used') await takeFiltered(hit.session);
+      continue;
+    }
+    if (!passedMisses.has(f.filePath)) {
+      await cache?.set(key, f, {
+        outcome: 'prefiltered',
+        pathDeps: prefiltered.excludedCwdDeps.get(f.filePath) ?? [],
+      });
+      continue;
+    }
+    ar.filesRead++;
+    const s = await ar.adapter.readSession(f, config);
+    // A file containing not one record of this source's own format (another
+    // source's log, or an unrelated jsonl) is excluded as a source mismatch
+    // (§format detection, v1.5.0).
+    if (!s.formatRecognized) {
+      ar.formatSkipped.push(f.filePath);
+      await cache?.set(key, f, { outcome: 'unrecognized' });
+      continue;
+    }
+    const r = await takeFiltered(s);
+    // Only a session that contributed to the output carries its raw data
+    // forward. The rest remember just the outcome and their cwd dependencies.
+    await cache?.set(key, f, r.used
+      ? { outcome: 'used', session: s }
+      : { outcome: 'dropped', pathDeps: r.cwdDeps });
+  }
+  ar.sessions = kept;
+}
+
+async function run(
+  opts: CliOptions,
+  out: OutputSink = consoleSink,
+  cache?: AnalysisCache,
+): Promise<RunOutcome> {
   const { config, errors: configErrors, warnings } = await loadConfig(opts.outDir, opts.projectPath);
-  for (const w of warnings) console.warn(w);
+  for (const w of warnings) out.warn(w);
+
+  // The value read during a cycle governs the wait that follows that cycle (§4.3).
+  const intervalSeconds = config.watchIntervalSeconds;
+  const fail = (msg: string): RunOutcome =>
+    outcome({ code: EXIT_RUNTIME, failure: msg, intervalSeconds });
+  const plain = (code: number): RunOutcome => outcome({ code, intervalSeconds });
 
   if (configErrors.length) {
-    for (const e of configErrors) console.error(`Config error: ${e}`);
-    if (!opts.dryRun) return EXIT_RUNTIME;
-    console.error('(dry run) continuing with best-effort defaults.');
+    for (const e of configErrors) out.error(`Config error: ${e}`);
+    // §4.3 decision table: "config turns fatal while running -> the wait after
+    // that cycle is the default 5s". Corrupt JSON already gives 5s naturally,
+    // because loadConfig returns early with the defaults; but when the JSON
+    // parses and the error is fatal for another reason (a filename collision, a
+    // template that cannot be resolved), watchIntervalSeconds has already been
+    // assigned, so it is explicitly reset to the default here. This is NOT
+    // "remember and substitute the last good value" — no state is kept.
+    if (!opts.dryRun) {
+      return outcome({
+        code: EXIT_RUNTIME,
+        failure: `Config error: ${configErrors[0]}`,
+        intervalSeconds: DEFAULT_INTERVAL_SECONDS,
+      });
+    }
+    out.error('(dry run) continuing with best-effort defaults.');
   }
 
   if (opts.initTemplate) {
-    return initTemplate(opts, config);
+    return plain(await initTemplate(opts, config, out));
   }
 
   const adapters = adaptersForMode(opts.mode);
@@ -219,18 +422,18 @@ async function run(opts: CliOptions): Promise<number> {
   if (opts.backupMd) {
     const mdFiles = await listExportedMdFiles(opts.outDir, config);
     if (mdFiles.length === 0) {
-      console.log('No files to back up.');
-      return EXIT_OK;
+      out.log('No files to back up.');
+      return plain(EXIT_OK);
     }
     const folder = backupFolderName(new Date());
     if (opts.dryRun) {
-      console.log(`(dry run) would back up ${mdFiles.length} md file(s) to ${path.join(opts.outDir, 'backup_CCXLOG_md', folder)}`);
-      for (const f of mdFiles) console.log(`  - ${path.basename(f)}`);
-      return EXIT_OK;
+      out.log(`(dry run) would back up ${mdFiles.length} md file(s) to ${path.join(opts.outDir, 'backup_CCXLOG_md', folder)}`);
+      for (const f of mdFiles) out.log(`  - ${path.basename(f)}`);
+      return plain(EXIT_OK);
     }
     const copied = await backupMdFiles(mdFiles, opts.outDir, folder, opts.verbose);
-    console.log(`Backed up ${copied} md file(s).`);
-    return EXIT_OK;
+    out.log(`Backed up ${copied} md file(s).`);
+    return plain(EXIT_OK);
   }
 
   // Namespace validation for extra roots.
@@ -252,16 +455,19 @@ async function run(opts: CliOptions): Promise<number> {
       }
     }
     checkRootNamespaces(roots, adapter.id, runErrors);
-    adapterRuns.push({ adapter, roots, files: [], filesRead: 0, formatSkipped: [], sessions: [] });
+    adapterRuns.push({
+      adapter, roots, files: [], filesRead: 0, reparsed: 0, reused: 0,
+      formatSkipped: [], sessions: [],
+    });
   }
   if (runErrors.length) {
-    for (const e of runErrors) console.error(`Config error: ${e}`);
-    return EXIT_RUNTIME;
+    for (const e of runErrors) out.error(`Config error: ${e}`);
+    return fail(`Config error: ${runErrors[0]}`);
   }
 
   // Discovery.
   for (const ar of adapterRuns) {
-    ar.files = await discoverFiles(ar.roots);
+    ar.files = await discoverFiles(ar.roots, out);
   }
 
   // Read + filter sessions.
@@ -273,31 +479,22 @@ async function run(opts: CliOptions): Promise<number> {
     includeSubdirectories: config.includeSubdirectories,
     canonicalProjectPath,
   };
+  // Drop the whole cache if the premises of the analysis changed (a no-op otherwise).
+  cache?.useFingerprint(analysisFingerprint(config, opts, filterCtx));
   for (const ar of adapterRuns) {
-    const kept: SessionData[] = [];
-    // 事前フィルタ（現状 Codex のみ実装）: 属し得ないファイルを全パース前に
-    // 除外する。属否不明のファイルは残る（cwdScanner.ts のフォールバック設計）。
-    const filesToRead = ar.adapter.prefilterFiles
-      ? await ar.adapter.prefilterFiles(ar.files, config, filterCtx)
-      : ar.files;
-    ar.filesRead = filesToRead.length;
-    for (const f of filesToRead) {
-      const s = await ar.adapter.readSession(f, config);
-      // 自ソース形式のレコードを1つも含まないファイル（他ソースのログ・
-      // 無関係の jsonl）はソース不一致として除外する（§形式判定・v1.5.0）。
-      if (!s.formatRecognized) { ar.formatSkipped.push(f.filePath); continue; }
-      const { pairs, belongs } = await ar.adapter.filterSession(s, config, filterCtx);
-      if (pairs.length > 0) kept.push({ ...s, allPairs: pairs });
-      else if (belongs) kept.push({ ...s, allPairs: [] });
+    await readAdapterSessions(ar, config, filterCtx, cache);
+    if (ar.adapter.refreshSessionMetadata) {
+      ar.sessions = await ar.adapter.refreshSessionMetadata(ar.sessions, ar.roots);
     }
-    ar.sessions = kept;
   }
+  // Discard entries for files that stopped being discovered (deleted or moved).
+  cache?.endCycle();
 
-  if (opts.verbose) printVerbose(opts, config, adapterRuns);
+  if (opts.verbose) printVerbose(opts, config, adapterRuns, out, cache);
 
   // --backup-jsonl: standalone (§9.5).
   if (opts.backupJsonl) {
-    return backupJsonl(opts, adapterRuns);
+    return plain(await backupJsonl(opts, adapterRuns, out));
   }
 
   // Build UnifiedPairs for each session (questionOrdinal = index in filtered pairs).
@@ -325,45 +522,37 @@ async function run(opts: CliOptions): Promise<number> {
 
   // Template diagnostics (all modes).
   if (hasBothProgress(config.template)) {
-    console.warn('Warning: template contains both %Progress% and %ProgressFull%; both will be filled.');
+    out.warn('Warning: template contains both %Progress% and %ProgressFull%; both will be filled.');
   }
   if (!templateHasSource(config.template)) {
-    console.warn('Warning: template has no %Source%; source will be hard to tell apart in the output.');
+    out.warn('Warning: template has no %Source%; source will be hard to tell apart in the output.');
   }
   if (opts.verbose) {
     const unknown = unknownPlaceholders(config.template);
     if (unknown.length) {
-      console.warn(`Warning: template has unknown placeholder(s) left verbatim: ${unknown.map(n => `%${n}%`).join(', ')}.`);
+      out.warn(`Warning: template has unknown placeholder(s) left verbatim: ${unknown.map(n => `%${n}%`).join(', ')}.`);
     }
   }
 
   // Terminate condition (§3.3/§10-1): total adopted pairs == 0.
+  // Under watch this is not a reason to stop but a failed cycle; once logs
+  // appear, later cycles recover on their own (§10.1).
   if (allPairs.length === 0) {
-    console.error('No pairs found for the selected source(s). Candidate log directories:');
+    out.error('No pairs found for the selected source(s). Candidate log directories:');
     for (const ar of adapterRuns) {
-      for (const r of ar.roots) console.error(`  - [${ar.adapter.id}] ${r.dir}`);
+      for (const r of ar.roots) out.error(`  - [${ar.adapter.id}] ${r.dir}`);
     }
-    return EXIT_RUNTIME;
+    return fail('no pairs collected (no Claude Code / Codex sessions matched this project yet)');
   }
 
   if (!opts.dryRun) await fs.mkdir(opts.outDir, { recursive: true });
   const mdBackupDir = path.join(opts.outDir, BACKUP_MD_AUTO_DIR, backupFolderName(new Date()));
-
-  // Optional lock (§8.6).
-  let lock: LockHandle | undefined;
-  if (opts.lock && !opts.dryRun) {
-    const res = await acquireLock(opts.outDir, opts.forceUnlock);
-    if (res.error) { console.error(`Lock error: ${res.error}`); return EXIT_RUNTIME; }
-    lock = res.handle;
-  }
-  try {
-    if (opts.perSession) {
-      return await writePerSession(opts, config, sessionUnified, mdBackupDir);
-    }
-    return await writeAggregate(opts, config, allPairs, sessionUnified, mdBackupDir);
-  } finally {
-    if (lock) await releaseLock(lock);
-  }
+  // main() and runWatch() own the output lock for the complete operation.
+  // run() must not acquire it again because watch cycles run under that lock.
+  const r = opts.perSession
+    ? await writePerSession(opts, config, sessionUnified, mdBackupDir, out)
+    : await writeAggregate(opts, config, allPairs, sessionUnified, mdBackupDir, out);
+  return { ...r, intervalSeconds };
 }
 
 async function writeAggregate(
@@ -372,7 +561,8 @@ async function writeAggregate(
   allPairs: UnifiedPair[],
   sessionUnified: SessionUnified[],
   mdBackupDir: string,
-): Promise<number> {
+  out: OutputSink,
+): Promise<RunOutcome> {
   const sorted = [...allPairs].sort(compareUnifiedPairs);
   // Two-stage dedupe (§6.3): first the conservative per-session logical dedupe
   // (snapshots / prefixes / identical whole files), then the cross-session pass
@@ -390,38 +580,49 @@ async function writeAggregate(
   const filePath = path.join(opts.outDir, aggName);
 
   const planned = await planWrite(filePath, content, 'aggregate');
-  if (!planned.ok) { console.error(`Error: ${planned.error}`); return EXIT_RUNTIME; }
+  if (!planned.ok) { out.error(`Error: ${planned.error}`); return outcome({ code: EXIT_RUNTIME, failure: planned.error }); }
   const plan = planned.plan;
 
   // Backup phase: take + verify the required backup before any write (§8.5).
   let backedUp = false;
   if (!opts.dryRun && plan.backupRequired) {
     if (!(await backupAndVerify(plan.filePath, mdBackupDir))) {
-      console.error(`Error: backup failed for ${plan.filePath}; not overwriting.`);
-      return EXIT_RUNTIME;
+      out.error(`Error: backup failed for ${plan.filePath}; not overwriting.`);
+      return outcome({ code: EXIT_RUNTIME, failure: `backup failed for ${plan.filePath}; not overwriting.` });
     }
     backedUp = true;
   }
 
   const commit = await commitPlan(plan, { dryRun: opts.dryRun, alreadyBackedUp: backedUp, backupDir: mdBackupDir });
-  if (commit.error) { console.error(`Error: ${commit.error}`); return EXIT_RUNTIME; }
+  if (commit.error) { out.error(`Error: ${commit.error}`); return outcome({ code: EXIT_RUNTIME, failure: commit.error }); }
 
-  console.log(`Mode: aggregate (${aggName}) [${opts.mode}]`);
+  out.log(`Mode: aggregate (${aggName}) [${opts.mode}]`);
   // Per-session result lines with unparseable counts, surfaced in aggregate mode
   // too (§3.3/§3.4) — not just per-session mode.
   for (const su of sessionUnified) {
     const idShort = su.session.sessionId.slice(0, 8);
     const skipNote = su.session.skippedLines ? ` [${su.session.skippedLines} unparseable lines]` : '';
-    console.log(`[${su.adapter.id}:${idShort}] ${su.pairs.length} pair(s)${skipNote}`);
+    out.log(`[${su.adapter.id}:${idShort}] ${su.pairs.length} pair(s)${skipNote}`);
   }
-  if (removed > 0) console.log(`De-duplicated ${removed} logical duplicate pair(s).`);
-  if (removedForks > 0) console.log(`Removed ${removedForks} duplicate pair(s) from resumed/forked sessions.`);
+  if (removed > 0) out.log(`De-duplicated ${removed} logical duplicate pair(s).`);
+  if (removedForks > 0) out.log(`Removed ${removedForks} duplicate pair(s) from resumed/forked sessions.`);
   if (opts.verbose && possibleDuplicates > 0) {
-    console.log(`Kept ${possibleDuplicates} possible duplicate pair(s) (same question key, not confirmed identical).`);
+    out.log(`Kept ${possibleDuplicates} possible duplicate pair(s) (same question key, not confirmed identical).`);
   }
-  if (backedUp || (opts.dryRun && plan.backupRequired)) console.log(`Backed up 1 pre-overwrite md file to ${mdBackupDir}`);
-  console.log(`Done. ${kept.length} pair(s) total [${commit.result}]${opts.dryRun ? ' (dry run)' : ''}.`);
-  return EXIT_OK;
+  const reportBackup = backedUp || (opts.dryRun && plan.backupRequired);
+  if (reportBackup) out.log(`Backed up 1 pre-overwrite md file to ${mdBackupDir}`);
+  out.log(`Done. ${kept.length} pair(s) total [${commit.result}]${opts.dryRun ? ' (dry run)' : ''}.`);
+
+  const writes = emptyWriteCounts();
+  writes[commit.result]++;
+  return outcome({
+    code: EXIT_OK,
+    pairs: kept.length,
+    writes,
+    changed: commit.result !== 'noop',
+    changeLine: `${kept.length} pair(s) [${commit.result}]${reportBackup ? ' (backed up 1 file)' : ''}`,
+    writeLabel: commit.result,
+  });
 }
 
 interface SessionUnified { session: SessionData; adapter: SourceAdapter; pairs: UnifiedPair[]; }
@@ -434,7 +635,8 @@ async function writePerSession(
   config: CcxlogConfig,
   sessionUnified: SessionUnified[],
   mdBackupDir: string,
-): Promise<number> {
+  out: OutputSink,
+): Promise<RunOutcome> {
   const writeTasks: WriteTask[] = [];
   const deleteCandidates: DeleteTask[] = [];
   for (const su of sessionUnified) {
@@ -461,18 +663,19 @@ async function writePerSession(
   }
   for (const [, arr] of byName) {
     if (arr.length > 1) {
-      console.error(`Error: per-session output name collision: ${arr.map(t => t.fileName).join(' / ')} produced by ${arr.length} sessions.`);
-      return EXIT_RUNTIME;
+      const msg = `per-session output name collision: ${arr.map(t => t.fileName).join(' / ')} produced by ${arr.length} sessions.`;
+      out.error(`Error: ${msg}`);
+      return outcome({ code: EXIT_RUNTIME, failure: msg });
     }
   }
 
-  console.log(`Mode: per-session [${opts.mode}]`);
+  out.log(`Mode: per-session [${opts.mode}]`);
 
   // Plan all writes (§8.5 step 2). An ownership-unconfirmed target aborts.
   const plans: Array<{ task: WriteTask; plan: WritePlan }> = [];
   for (const t of writeTasks) {
     const pr = await planWrite(t.filePath, t.content, 'session');
-    if (!pr.ok) { console.error(`Error: ${pr.error}`); return EXIT_RUNTIME; }
+    if (!pr.ok) { out.error(`Error: ${pr.error}`); return outcome({ code: EXIT_RUNTIME, failure: pr.error }); }
     plans.push({ task: t, plan: pr.plan });
   }
 
@@ -482,23 +685,26 @@ async function writePerSession(
     if (await sessionDeletable(dc.filePath, dc.su)) deletes.push(dc);
   }
 
-  // バックアップ段階: backupRequired な書き換え（ccxlogid 消失時のみ、v1.4.0
-  // R2）＋ファイル削除（ID 全消失に相当）を、書き込み・削除より前にすべて
-  // 取得・検証する（§8.5 step 3）。1つでも失敗したら実行全体を中止する。
+  // Backup stage: every rewrite marked backupRequired (only when ccxlogid is
+  // lost, v1.4.0 R2) plus every file deletion (equivalent to losing all ids) is
+  // taken and verified BEFORE any write or delete happens (§8.5 step 3). A
+  // single failure aborts the entire run.
   const backedUpSet = new Set<string>();
   if (!opts.dryRun) {
     for (const { plan } of plans) {
       if (!plan.backupRequired) continue;
       if (!(await backupAndVerify(plan.filePath, mdBackupDir))) {
-        console.error(`Error: backup failed for ${plan.filePath}; not writing anything.`);
-        return EXIT_RUNTIME;
+        const msg = `backup failed for ${plan.filePath}; not writing anything.`;
+        out.error(`Error: ${msg}`);
+        return outcome({ code: EXIT_RUNTIME, failure: msg });
       }
       backedUpSet.add(plan.filePath);
     }
     for (const d of deletes) {
       if (!(await backupAndVerify(d.filePath, mdBackupDir))) {
-        console.error(`Error: backup failed for ${d.filePath}; not writing anything.`);
-        return EXIT_RUNTIME;
+        const msg = `backup failed for ${d.filePath}; not writing anything.`;
+        out.error(`Error: ${msg}`);
+        return outcome({ code: EXIT_RUNTIME, failure: msg });
       }
       backedUpSet.add(d.filePath);
     }
@@ -508,6 +714,8 @@ async function writePerSession(
   let totalPairs = 0;
   let backedUp = 0;
   let hadError = false;
+  let removedFiles = 0;
+  const writes = emptyWriteCounts();
   const updated: string[] = [];
   const notUpdated: string[] = [];
 
@@ -521,46 +729,65 @@ async function writePerSession(
       backupDir: mdBackupDir,
     });
     if (commit.error) {
-      console.error(`Error: ${commit.error}`);
+      out.error(`Error: ${commit.error}`);
       notUpdated.push(task.fileName);
       hadError = true;
       continue;
     }
     if (backedUpSet.has(plan.filePath) || (opts.dryRun && plan.backupRequired)) backedUp++;
     totalPairs += su.pairs.length;
+    writes[commit.result]++;
     if (commit.result !== 'noop') updated.push(task.fileName);
-    console.log(`[${su.adapter.id}:${idShort}] ${su.pairs.length} pair(s) [${commit.result}]${skipNote}`);
+    out.log(`[${su.adapter.id}:${idShort}] ${su.pairs.length} pair(s) [${commit.result}]${skipNote}`);
   }
 
   // Deletions (already backed up above).
   const deletableSet = new Set(deletes.map(d => d.filePath));
   for (const d of deletes) {
     const idShort = d.su.session.sessionId.slice(0, 8);
-    if (opts.dryRun) { console.log(`[${d.su.adapter.id}:${idShort}] 0 pair(s) (would remove file)`); continue; }
+    if (opts.dryRun) {
+      removedFiles++;
+      out.log(`[${d.su.adapter.id}:${idShort}] 0 pair(s) (would remove file)`);
+      continue;
+    }
     try {
       await fs.unlink(d.filePath);
+      removedFiles++;
       updated.push(path.basename(d.filePath));
-      console.log(`[${d.su.adapter.id}:${idShort}] 0 pair(s) (file removed)`);
+      out.log(`[${d.su.adapter.id}:${idShort}] 0 pair(s) (file removed)`);
     } catch {
       hadError = true;
       notUpdated.push(path.basename(d.filePath));
-      console.log(`[${d.su.adapter.id}:${idShort}] 0 pair(s) (removal failed)`);
+      out.log(`[${d.su.adapter.id}:${idShort}] 0 pair(s) (removal failed)`);
     }
   }
   for (const dc of deleteCandidates) {
     if (deletableSet.has(dc.filePath)) continue;
     const idShort = dc.su.session.sessionId.slice(0, 8);
-    console.log(`[${dc.su.adapter.id}:${idShort}] 0 pair(s) (kept)`);
+    out.log(`[${dc.su.adapter.id}:${idShort}] 0 pair(s) (kept)`);
   }
 
-  if (backedUp > 0) console.log(`Backed up ${backedUp} pre-overwrite md file(s) to ${mdBackupDir}`);
+  if (backedUp > 0) out.log(`Backed up ${backedUp} pre-overwrite md file(s) to ${mdBackupDir}`);
   if (hadError && updated.length > 0) {
-    console.error(`Partial update: ${updated.length} written, ${notUpdated.length} left unchanged. Re-run to converge (§8.5).`);
-    console.error(`  updated: ${updated.join(', ')}`);
-    console.error(`  not updated: ${notUpdated.join(', ')}`);
+    out.error(`Partial update: ${updated.length} written, ${notUpdated.length} left unchanged. Re-run to converge (§8.5).`);
+    out.error(`  updated: ${updated.join(', ')}`);
+    out.error(`  not updated: ${notUpdated.join(', ')}`);
   }
-  console.log(`Done. ${totalPairs} pair(s) total${opts.dryRun ? ' (dry run)' : ''}.`);
-  return hadError ? EXIT_RUNTIME : EXIT_OK;
+  out.log(`Done. ${totalPairs} pair(s) total${opts.dryRun ? ' (dry run)' : ''}.`);
+
+  const changedKinds = describeWrites(writes, ['create', 'append', 'rewrite']);
+  const changed = changedKinds !== 'none' || removedFiles > 0;
+  const extra = (removedFiles > 0 ? ` (removed ${removedFiles} file(s))` : '')
+    + (backedUp > 0 ? ` (backed up ${backedUp} file(s))` : '');
+  return outcome({
+    code: hadError ? EXIT_RUNTIME : EXIT_OK,
+    failure: hadError ? `per-session update incomplete: ${notUpdated.join(', ')} left unchanged` : undefined,
+    pairs: totalPairs,
+    writes,
+    changed,
+    changeLine: `${totalPairs} pair(s) [${changedKinds === 'none' ? 'noop' : changedKinds}]${extra}`,
+    writeLabel: describeWrites(writes),
+  });
 }
 
 // §9.7: a 0-pair session file may be deleted only when ALL conditions hold.
@@ -575,12 +802,13 @@ async function sessionDeletable(filePath: string, su: SessionUnified): Promise<b
   return true;
 }
 
-async function backupJsonl(opts: CliOptions, adapterRuns: AdapterRun[]): Promise<number> {
+async function backupJsonl(opts: CliOptions, adapterRuns: AdapterRun[], out: OutputSink): Promise<number> {
   const items: JsonlBackupItem[] = [];
-  // 自己増殖防止（v1.5.0）: extraLogDirs がコピー先（<out>/backup_jsonl）を含む
-  // 場所を指していても、既にコピー先配下にあるファイルはコピー元にしない。
-  // 読み込み（Markdown 出力）には影響せず、バックアップのたびに過去の
-  // バックアップまで複製されて膨らむことだけを防ぐ。
+  // Self-propagation guard (v1.5.0): even when extraLogDirs points somewhere
+  // that contains the copy destination (<out>/backup_jsonl), files already under
+  // that destination are never used as copy sources. Reading (Markdown output)
+  // is unaffected; this only stops each backup from duplicating earlier backups
+  // and growing without bound.
   const backupRoot = path.join(opts.outDir, 'backup_jsonl');
   for (const ar of adapterRuns) {
     // Both sources back up only files that were recognized as their own format
@@ -598,11 +826,12 @@ async function backupJsonl(opts: CliOptions, adapterRuns: AdapterRun[]): Promise
         relPath: path.relative(f.root.dir, f.filePath),
       });
     }
-    // Claude のサブエージェント記録は includeSidechain の設定に関わらず必ず
-    // バックアップに含める（v1.5.0。表示するかどうかとログを保全するかは別問題）。
+    // Claude subagent transcripts are always included in a backup regardless of
+    // the includeSidechain setting (v1.5.0): whether to DISPLAY them and whether
+    // to PRESERVE the logs are separate questions.
     if (ar.adapter.id === 'claude') {
       for (const root of ar.roots) {
-        for (const f of await listSubagentJsonl(root.dir)) {
+        for (const f of await listSubagentJsonl(root.dir, out)) {
           if (added.has(f) || isPathWithin(f, backupRoot)) continue;
           added.add(f);
           items.push({ filePath: f, source: 'claude', relPath: path.relative(root.dir, f) });
@@ -612,12 +841,12 @@ async function backupJsonl(opts: CliOptions, adapterRuns: AdapterRun[]): Promise
   }
   const folder = backupFolderName(new Date());
   if (opts.dryRun) {
-    console.log(`(dry run) would back up ${items.length} jsonl file(s) to ${path.join(opts.outDir, 'backup_jsonl', folder)}`);
+    out.log(`(dry run) would back up ${items.length} jsonl file(s) to ${path.join(opts.outDir, 'backup_jsonl', folder)}`);
     return EXIT_OK;
   }
   await fs.mkdir(opts.outDir, { recursive: true });
   const copied = await backupJsonlFiles(items, opts.outDir, folder, opts.verbose);
-  console.log(`Backed up ${copied} jsonl file(s).`);
+  out.log(`Backed up ${copied} jsonl file(s).`);
   return EXIT_OK;
 }
 
@@ -631,23 +860,39 @@ async function resolveRealPath(p: string): Promise<string> {
   try { return await fs.realpath(p); } catch { return p; }
 }
 
-function printVerbose(opts: CliOptions, config: CcxlogConfig, adapterRuns: AdapterRun[]): void {
-  console.log(`Project: ${opts.projectPath}`);
-  console.log(`Out dir: ${opts.outDir}`);
-  console.log(`Mode:    ${opts.mode}`);
+function printVerbose(
+  opts: CliOptions,
+  config: CcxlogConfig,
+  adapterRuns: AdapterRun[],
+  out: OutputSink,
+  cache: AnalysisCache | undefined,
+): void {
+  out.log(`Project: ${opts.projectPath}`);
+  out.log(`Out dir: ${opts.outDir}`);
+  out.log(`Mode:    ${opts.mode}`);
+  if (cache) {
+    // `fully read` counts the files that became candidates for a full parse, NOT
+    // the files actually read from disk this cycle. On a cycle where the
+    // incremental re-parse took effect, last cycle's analysis is reused and only
+    // `reparsed` files were truly read. The same explanation appears in the
+    // --watch section of the README.
+    out.log('  (fully read = files analysed this cycle; reparsed = files actually re-read from disk)');
+  }
   for (const ar of adapterRuns) {
-    console.log(`[${ar.adapter.id}] roots:`);
-    for (const r of ar.roots) console.log(`  ${r.origin === 'extra' ? '*' : '+'} ${r.dir}`);
-    console.log(`[${ar.adapter.id}] files: ${ar.files.length}, fully read: ${ar.filesRead}, sessions kept: ${ar.sessions.length}`
+    out.log(`[${ar.adapter.id}] roots:`);
+    for (const r of ar.roots) out.log(`  ${r.origin === 'extra' ? '*' : '+'} ${r.dir}`);
+    out.log(`[${ar.adapter.id}] files: ${ar.files.length}, fully read: ${ar.filesRead}, sessions kept: ${ar.sessions.length}`
+      // The breakdown is added only on a run where watch's incremental re-parse is active.
+      + (cache ? `, reparsed: ${ar.reparsed}, reused: ${ar.reused}` : '')
       + (ar.formatSkipped.length > 0 ? `, format-skipped: ${ar.formatSkipped.length}` : ''));
-    for (const f of ar.formatSkipped) console.log(`  skipped (not ${ar.adapter.id}-format): ${f}`);
+    for (const f of ar.formatSkipped) out.log(`  skipped (not ${ar.adapter.id}-format): ${f}`);
   }
   void config;
 }
 
 // ---- --init-template (§7.4) ---------------------------------------------
 
-async function initTemplate(opts: CliOptions, _config: CcxlogConfig): Promise<number> {
+async function initTemplate(opts: CliOptions, _config: CcxlogConfig, out: OutputSink): Promise<number> {
   const configPath = path.join(opts.outDir, CONFIG_FILE_NAME);
   let rawConfig: Record<string, unknown> = {};
   try {
@@ -658,7 +903,7 @@ async function initTemplate(opts: CliOptions, _config: CcxlogConfig): Promise<nu
     }
   } catch (e: unknown) {
     if ((e as NodeJS.ErrnoException).code !== 'ENOENT') {
-      console.warn(`Warning: could not read ${configPath}; starting with empty config.`);
+      out.warn(`Warning: could not read ${configPath}; starting with empty config.`);
     }
   }
 
@@ -669,7 +914,7 @@ async function initTemplate(opts: CliOptions, _config: CcxlogConfig): Promise<nu
   const sourcePath = path.join(PACKAGE_ROOT, 'templates', baseName);
 
   try { await fs.stat(sourcePath); } catch {
-    console.error(`Error: source template not found in ccxlog install: ${sourcePath}`);
+    out.error(`Error: source template not found in ccxlog install: ${sourcePath}`);
     return EXIT_RUNTIME;
   }
 
@@ -682,15 +927,15 @@ async function initTemplate(opts: CliOptions, _config: CcxlogConfig): Promise<nu
   const destExists = !isSelfCopy && await fs.stat(destPath).then(() => true, () => false);
 
   if (opts.dryRun) {
-    if (destExists) { console.error(`Error: ${destPath} already exists.`); return EXIT_RUNTIME; }
-    if (!isSelfCopy) console.log(`(dry run) would copy ${sourcePath} -> ${destPath}`);
-    else console.log(`(dry run) dest is the source file itself; would set config only.`);
-    console.log(`(dry run) would set template: "${newTemplate}"`);
+    if (destExists) { out.error(`Error: ${destPath} already exists.`); return EXIT_RUNTIME; }
+    if (!isSelfCopy) out.log(`(dry run) would copy ${sourcePath} -> ${destPath}`);
+    else out.log(`(dry run) dest is the source file itself; would set config only.`);
+    out.log(`(dry run) would set template: "${newTemplate}"`);
     return EXIT_OK;
   }
 
   if (destExists) {
-    console.error(`Error: ${destPath} already exists. Skipping copy.`);
+    out.error(`Error: ${destPath} already exists. Skipping copy.`);
     return EXIT_RUNTIME;
   }
   let copied = false;
@@ -698,7 +943,7 @@ async function initTemplate(opts: CliOptions, _config: CcxlogConfig): Promise<nu
     await fs.mkdir(destDir, { recursive: true });
     await fs.copyFile(sourcePath, destPath);
     copied = true;
-    console.log(`Copied: ${sourcePath} -> ${destPath}`);
+    out.log(`Copied: ${sourcePath} -> ${destPath}`);
   }
 
   rawConfig.template = newTemplate;
@@ -708,10 +953,10 @@ async function initTemplate(opts: CliOptions, _config: CcxlogConfig): Promise<nu
     // §7.4 step 5: on config-write failure, remove the newly-copied template so
     // the run leaves no half-applied state behind.
     if (copied) await fs.rm(destPath, { force: true });
-    console.error(`Error: failed to update ${configPath}: ${(e as Error).message}`);
+    out.error(`Error: failed to update ${configPath}: ${(e as Error).message}`);
     return EXIT_RUNTIME;
   }
-  console.log(`Updated: ${configPath} (template: "${newTemplate}")`);
+  out.log(`Updated: ${configPath} (template: "${newTemplate}")`);
   return EXIT_OK;
 }
 
@@ -767,8 +1012,15 @@ Options:
                          point the config at it.
   --backup-jsonl         Copy the discovered source .jsonl logs and exit.
   --backup-md            Copy the exported Markdown and exit.
-  --lock                 Opt-in exclusive lock on <out> for the run.
+  --lock                 Explicitly request the output lock (write operations
+                         and --watch lock automatically; kept for compatibility).
   --force-unlock         Remove a stale lock (use with --lock).
+  --watch                Run repeatedly: process, wait N seconds, process again
+                         (N = watchIntervalSeconds in ccxlog.config.json;
+                         default 5).
+  --watch=<n><unit>      Same, but stop after the given duration from start
+                         (positive integer + one unit s/m/h/d; e.g.
+                         --watch=60s). A number without a unit is an error.
   --dry-run              Report the plan without writing anything.
   --verbose              Verbose logging.
   -v, -V, --version      Show version and exit.
@@ -778,10 +1030,188 @@ Output filenames are configurable in <out>/ccxlog.config.json:
   outputAllFileName         merged output (default: ccxlog.md)
   claude.outputAllFileName  -cc output     (default: cclog.md)
   codex.outputAllFileName   -cx output     (default: cxlog.md)
+  watchIntervalSeconds      --watch wait    (default: 5, range 1-86400)
 
 The three aggregate outputs coexist in <out>; each mode only touches its own
 file. Progress rendering is controlled by the template (%Progress% /
 %ProgressFull%).`);
+}
+
+// ---- --watch (§5, §9, §10) -----------------------------------------------
+
+function errorMessage(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
+}
+
+// Consecutive-warning suppression within a cycle lives in `lib/watchWarnings.ts`
+// (§4.2 / §9.3). It is a separate unit with an injectable clock source so tests
+// can prove that wall-clock jumps do not break the suppression.
+
+// A fault-injection seam (§11.1). It exists only so a cycle can be made reliably
+// long enough to create the "cycle in progress" state deterministically
+// (acceptance tests F-42 / E43). Unset means 0.
+function testCycleDelayMs(): number {
+  const raw = process.env.CCXLOG_WATCH_TEST_CYCLE_DELAY_MS;
+  const n = raw === undefined ? 0 : Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
+async function runWatch(opts: CliOptions): Promise<number> {
+  // 1-2. Arguments are already parsed. Resolve project / out and load the config
+  // (a fatal error is exit code 1; --dry-run warns and continues, exactly as in a
+  // single run — §4.3).
+  let pre;
+  try {
+    pre = await loadConfig(opts.outDir, opts.projectPath);
+  } catch (e) {
+    console.error(`Config error: ${errorMessage(e)}`);
+    return EXIT_RUNTIME;
+  }
+  for (const w of pre.warnings) console.warn(w);
+  if (pre.errors.length) {
+    for (const e of pre.errors) console.error(`Config error: ${e}`);
+    if (!opts.dryRun) return EXIT_RUNTIME;
+    console.error('(dry run) continuing with best-effort defaults.');
+  }
+
+  const canonProject = await canonicalPath(opts.projectPath);
+  const canonOut = await canonicalPath(opts.outDir);
+
+  const warningReporter = createWarningReporter(consoleSink);
+  // Warnings emitted at startup carry over as the initial state, so the same bad
+  // setting is not immediately repeated on cycle 1 (the point of the
+  // consecutive-warning suppression in §4.2).
+  warningReporter.prime(pre.warnings);
+  const cycleDelayMs = testCycleDelayMs();
+  // The incremental re-parse cache. It lives only for the watch process and
+  // never touches disk, so cycle 1 starts empty — a classic cold run.
+  const cache = createAnalysisCache();
+  // runWatch() owns the lifetime lock, so individual cycles must not reacquire it.
+  const cycleOpts: CliOptions = { ...opts, lock: false, forceUnlock: false };
+  const loop = createWatchLoop({
+    durationSeconds: opts.watchDurationSeconds,
+    verbose: opts.verbose,
+    out: consoleSink,
+    cycle: () => runCycle(cycleOpts, warningReporter, cycleDelayMs, cache),
+  });
+
+  // Prevent competing watches and one-shot writes for the full watch lifetime,
+  // including waits between cycles. A dry run preserves its no-write contract.
+  let watchLock: LockHandle | undefined;
+  if (!opts.dryRun) {
+    await fs.mkdir(opts.outDir, { recursive: true });
+    const res = await acquireLock(opts.outDir, false);
+    if (res.error) {
+      // acquireLock's message ends with "Re-run with --force-unlock", which a
+      // watch cannot do (--watch and --force-unlock are mutually exclusive,
+      // §3.5). Point at the one-shot command that actually clears it instead, so
+      // the guidance is something the user can carry out.
+      console.error(`Lock error: ${res.error.replace(
+        ' Re-run with --force-unlock to remove it manually.',
+        ' A watch cannot force-unlock; clear it first with: ccxlog --lock --force-unlock',
+      )}`);
+      return EXIT_RUNTIME;
+    }
+    watchLock = res.handle;
+  }
+
+  // 3. Signal handlers (§10.2). SIGTERM is POSIX-only.
+  let sigintCount = 0;
+  const onSigint = () => {
+    sigintCount++;
+    // The second one quits immediately, with no grace period. Even mid-write,
+    // the existing atomic commit (temp + rename) keeps the output file intact.
+    if (sigintCount >= 2) process.exit(130);
+    if (loop.isProcessing()) {
+      console.error('Stopping after the current cycle... (press Ctrl+C again to force quit)');
+    }
+    loop.requestStop('sigint');
+  };
+  const onSigterm = () => loop.requestStop('sigterm');
+  process.on('SIGINT', onSigint);
+  if (process.platform !== 'win32') process.on('SIGTERM', onSigterm);
+
+  // Print the banner and run the loop while holding the lifetime lock.
+  let summary;
+  try {
+    const durationLabel = opts.watchDurationSeconds === null ? 'unlimited' : `${opts.watchDurationSeconds}s`;
+    const killHint = process.platform === 'win32' ? `taskkill /F /PID ${process.pid}` : `kill ${process.pid}`;
+    console.log(`ccxlog watch started (pid ${process.pid}): interval ${pre.config.watchIntervalSeconds}s`
+      + `, duration ${durationLabel}, mode ${opts.mode}${opts.dryRun ? ' (dry run)' : ''}`);
+    console.log(`  project: ${canonProject}`);
+    console.log(opts.perSession
+      ? `  output:  per-session files in ${canonOut}`
+      : `  output:  ${path.join(canonOut, aggregateName(pre.config, opts.mode))}`);
+    console.log(`Press Ctrl+C to stop, or terminate pid ${process.pid} from another terminal (e.g. ${killHint}).`);
+    summary = await loop.run();
+  } finally {
+    process.off('SIGINT', onSigint);
+    if (process.platform !== 'win32') process.off('SIGTERM', onSigterm);
+    if (watchLock) await releaseLock(watchLock);
+  }
+
+  for (const line of formatSummary(summary)) console.log(line);
+  return summary.exitCode;
+}
+
+async function runCycle(
+  opts: CliOptions,
+  warningReporter: WarningReporter,
+  delayMs: number,
+  cache: AnalysisCache,
+): Promise<WatchCycleResult> {
+  const warnings: string[] = [];
+  const sink = opts.verbose ? consoleSink : collectingSink(warnings);
+  cache.beginCycle();
+  clearCanonicalPathCache();
+  try {
+    const r = await run(opts, sink, cache);
+    if (delayMs > 0) await delay(delayMs);
+    if (!opts.verbose) warningReporter.report(warnings);
+    return {
+      ok: r.code === EXIT_OK,
+      failure: r.failure,
+      pairs: r.pairs,
+      writes: r.writes,
+      changed: r.changed,
+      changeLine: r.changeLine,
+      writeLabel: r.writeLabel,
+      intervalSeconds: r.intervalSeconds,
+      cache: cache.stats(),
+    };
+  } catch (e) {
+    if (opts.verbose && e instanceof Error && e.stack) console.error(e.stack);
+    if (!opts.verbose) warningReporter.report(warnings);
+    return {
+      ok: false,
+      failure: errorMessage(e),
+      pairs: 0,
+      writes: emptyWriteCounts(),
+      changed: false,
+      writeLabel: 'none',
+      intervalSeconds: DEFAULT_INTERVAL_SECONDS,
+      cache: cache.stats(),
+    };
+  }
+}
+
+// One-shot operations use the same output lock. Therefore a regular ccxlog
+// command fails before writing while a watch owns the output directory.
+async function runOnceWithLock(opts: CliOptions): Promise<RunOutcome> {
+  if (opts.dryRun) return await run(opts);
+
+  await fs.mkdir(opts.outDir, { recursive: true });
+  const res = await acquireLock(opts.outDir, opts.forceUnlock);
+  if (res.error || !res.handle) {
+    const msg = res.error ?? `Could not acquire lock in ${opts.outDir}`;
+    console.error(`Lock error: ${msg}`);
+    return outcome({ code: EXIT_RUNTIME, failure: `Lock error: ${msg}` });
+  }
+  try {
+    return await run({ ...opts, lock: false, forceUnlock: false });
+  } finally {
+    await releaseLock(res.handle);
+  }
 }
 
 async function main(): Promise<void> {
@@ -794,8 +1224,12 @@ async function main(): Promise<void> {
     process.exitCode = EXIT_USAGE;
     return;
   }
-  const code = await run(r.opts);
-  process.exitCode = code;
+  if (r.opts.watch) {
+    process.exitCode = await runWatch(r.opts);
+    return;
+  }
+  const res = await runOnceWithLock(r.opts);
+  process.exitCode = res.code;
 }
 
 main().catch(err => {

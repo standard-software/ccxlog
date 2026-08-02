@@ -31,11 +31,12 @@ test('recursion is source-defined and legacy config values are ignored', t => {
   assert.match(md, /codex nested/);
 });
 
-// v1.5.0 仕様変更: 明示指定した extra ルートの配下は「名前」でも「<out> 内包」
-// でも除外しない — ユーザーが指した場所を読むのが意図どおり。
-// （旧仕様は templates/ backup_*/ と <out> 配下を一律ブロックしていた。
-//   --backup-jsonl の自己増殖は探索でなくコピー元選定で防ぐ。
-//   → tests/backupSelfExclusion.test.mjs）
+// v1.5.0 behaviour change: nothing under an explicitly configured extra root is
+// excluded, neither by NAME nor for being INSIDE <out> — reading the place the
+// user pointed at is exactly the intent.
+// (The old behaviour blocked templates/, backup_*/ and everything under <out>
+//  wholesale. `--backup-jsonl` self-propagation is prevented when choosing copy
+//  sources, not during discovery -> tests/backupSelfExclusion.test.mjs)
 test('an explicit extra root ingests everything under it, including backup_*/templates (v1.5.0)', t => {
   const ws = workspace(t);
   const logs = path.join(ws.root, 'logs');

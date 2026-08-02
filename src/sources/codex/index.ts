@@ -2,10 +2,12 @@ import path from 'node:path';
 import type { CcxlogConfig } from '../../lib/config.js';
 import { getCodexSessionsDir, sha256HexBytes, canonicalPathString, canonicalPath, isPathWithin, buildRelativeId } from '../../lib/pathUtils.js';
 import { extractCwd } from '../../lib/metaExtractor.js';
-import type { SourceAdapter, RootRef, DiscoveredFile, SessionData, FilterContext } from '../adapter.js';
+import type { SourceAdapter, RootRef, DiscoveredFile, SessionData, FilterContext, FilterResult } from '../adapter.js';
+import { applyProgressRetention } from '../../lib/progressData.js';
 import { prefilterCodexFiles } from './cwdScanner.js';
 import { readJsonl } from './jsonlReader.js';
-import { buildPairs, extractSessionName } from './pairBuilder.js';
+import { buildPairs } from './pairBuilder.js';
+import { applyCodexSessionNames } from './sessionIndex.js';
 
 export const codexAdapter: SourceAdapter = {
   id: 'codex',
@@ -30,9 +32,9 @@ export const codexAdapter: SourceAdapter = {
 
   outputAllFileName(cfg: CcxlogConfig): string { return cfg.codex.outputAllFileName; },
   sessionFilePrefix(cfg: CcxlogConfig): string { return cfg.codex.outputSessionFilePrefix; },
-  // 全パース前の cwd プリフィルタ（cwdScanner.ts 参照）。除外して良いのは
-  // 「確実にこのプロジェクトに属さない」ファイルだけで、cwd 不明・走査失敗は
-  // 通常解析へフォールバックする。
+  // The cwd prefilter that runs before any full parse (see cwdScanner.ts). The
+  // only files it may exclude are those that definitely do not belong to this
+  // project; an unknown cwd or a failed scan falls back to normal analysis.
   async prefilterFiles(files: DiscoveredFile[], _cfg: CcxlogConfig, ctx: FilterContext) {
     return prefilterCodexFiles(files, ctx);
   },
@@ -43,17 +45,24 @@ export const codexAdapter: SourceAdapter = {
     return {
       source: 'codex',
       sessionId: r.sessionId || rolloutBase,
-      sessionName: r.sessionName || extractSessionName(r.entries),
+      sessionName: r.sessionName,
       sessionCwd: r.sessionCwd ?? '',
       jsonlPath: file.filePath,
       sourceFileRelativeId: buildRelativeId('codex', file.root.origin, file.root.stableRootKey, file.root.dir, file.filePath),
       fromExplicitRoot: file.root.origin === 'extra',
       fileContentHash: r.fileContentHash,
       eventIdStream: r.eventIdStream,
-      allPairs: buildPairs(r.entries),
+      // Pair boundaries (decided from the presence of in-progress entries) are
+      // settled entirely inside buildPairs(). Discarding happens afterwards, so
+      // the boundaries do not move (lib/progressData.ts).
+      allPairs: applyProgressRetention(buildPairs(r.entries), cfg),
       skippedLines: r.skippedLines,
       formatRecognized: r.formatRecognized,
     };
+  },
+
+  async refreshSessionMetadata(sessions: SessionData[], roots: RootRef[]): Promise<SessionData[]> {
+    return applyCodexSessionNames(sessions, roots);
   },
 
   // Codex mixes every project into one tree, so keep only the pairs whose
@@ -63,12 +72,14 @@ export const codexAdapter: SourceAdapter = {
   // — the exact-match set is widened to an isPathWithin check against the
   // canonical project path. A same-prefix sibling (project-backup) fails the
   // within-check, so it is never pulled in.
-  async filterSession(s: SessionData, _cfg: CcxlogConfig, ctx: FilterContext) {
+  async filterSession(s: SessionData, _cfg: CcxlogConfig, ctx: FilterContext): Promise<FilterResult> {
     // Files under an explicit extraLogDirs root are trusted verbatim (§5.2);
     // use the structured flag rather than parsing the relative-id string.
     if (s.fromExplicitRoot) return { pairs: s.allPairs, belongs: true };
+    const resolved = new Map<string, string>();
     const wanted = async (raw: string): Promise<boolean> => {
       const canon = await canonicalPath(raw);
+      resolved.set(raw, canon);
       if (ctx.wantedCwds.has(canon)) return true;
       return ctx.includeSubdirectories && isPathWithin(canon, ctx.canonicalProjectPath);
     };
@@ -79,6 +90,11 @@ export const codexAdapter: SourceAdapter = {
     }
     let belongs = pairs.length > 0;
     if (!belongs && s.sessionCwd && await wanted(s.sessionCwd)) belongs = true;
-    return { pairs, belongs };
+    if (pairs.length > 0 || belongs) return { pairs, belongs };
+    return {
+      pairs,
+      belongs,
+      cwdDeps: [...resolved].map(([raw, canon]) => ({ raw, canon })),
+    };
   },
 };

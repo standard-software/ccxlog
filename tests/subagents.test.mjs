@@ -1,7 +1,3 @@
-// サブエージェント記録の探索（v1.5.0 / § includeSidechain）:
-// 新しめの Claude Code は subagent の会話を
-// `<ルート>/<セッションID>/subagents/*.jsonl` に isSidechain:true 付きで保存する。
-// includeSidechain 有効時のみこのレイアウトを探索し、追加セッションとして描画する。
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -12,9 +8,7 @@ import {
 
 const SESS = '14157c8b-9332-490f-bb5b-bdaf9d6492e1';
 
-// 本体ペア（11:03）より前の時刻にして、有効化時に「時系列途中への挿入」となる
-// ケース（= v1.4.0 の ID 追加のみ・バックアップなし書き換え）を検証できるようにする
-function sidechainQA(projectPath, { q = 'サブエージェントへの指示', a = 'サブエージェントの報告', ts = '2026-05-27T10:00:00.000Z' } = {}) {
+function sidechainQA(projectPath, { q = 'Instructions for the subagent', a = 'Subagent report', ts = '2026-05-27T10:00:00.000Z' } = {}) {
   return [
     { type: 'user', uuid: 'sub-u1', parentUuid: null, timestamp: ts, cwd: projectPath, version: '1.0.0',
       gitBranch: 'main', isSidechain: true, message: { role: 'user', content: q } },
@@ -31,7 +25,6 @@ function scaffold() {
   const out = path.join(project, 'CCXLOG');
   writeClaudeSession(home, project, `${SESS}.jsonl`, claudeQA(project));
   writeClaudeSession(home, project, path.join(SESS, 'subagents', 'agent-a5b95863.jsonl'), sidechainQA(project));
-  // subagents/ の直下より深い階層と、subagents を持たない兄弟ディレクトリは対象外
   writeClaudeSession(home, project, path.join(SESS, 'subagents', 'nested', 'agent-deep.jsonl'),
     sidechainQA(project, { q: 'DEEP-NESTED-MUST-NOT-APPEAR' }));
   writeClaudeSession(home, project, path.join('memory', 'notes.jsonl'), claudeQA(project, { q: 'MEMORY-DIR-MUST-NOT-APPEAR', uuid: 'u-mem' }));
@@ -45,7 +38,7 @@ test('subagents: not discovered when includeSidechain is off (default)', () => {
     assert.equal(r.code, 0, r.stderr);
     const file = path.join(s.out, 'cclog.md');
     assert.equal(countPairs(file), 1);
-    assert.doesNotMatch(fs.readFileSync(file, 'utf-8'), /サブエージェントへの指示/);
+    assert.doesNotMatch(fs.readFileSync(file, 'utf-8'), /Instructions for the subagent/);
   } finally { s.cleanup(); }
 });
 
@@ -57,9 +50,8 @@ test('subagents: includeSidechain=true renders subagent transcripts as extra ses
     assert.equal(r.code, 0, r.stderr);
     const text = fs.readFileSync(path.join(s.out, 'cclog.md'), 'utf-8');
     assert.equal(countPairs(path.join(s.out, 'cclog.md')), 2);
-    assert.match(text, /サブエージェントへの指示/);
-    assert.match(text, /サブエージェントの報告/);
-    // subagents/ 直下のみ。深い階層と memory/ は拾わない
+    assert.match(text, /Instructions for the subagent/);
+    assert.match(text, /Subagent report/);
     assert.doesNotMatch(text, /DEEP-NESTED-MUST-NOT-APPEAR/);
     assert.doesNotMatch(text, /MEMORY-DIR-MUST-NOT-APPEAR/);
   } finally { s.cleanup(); }
@@ -74,7 +66,7 @@ test('subagents: per-session mode writes a file with the __subagents__ session i
     const files = fs.readdirSync(s.out).filter(f => f.startsWith('cclog_'));
     const subFile = files.find(f => f.includes('__subagents__agent-a5b95863'));
     assert.ok(subFile, `subagent per-session file not found in: ${files.join(', ')}`);
-    assert.match(fs.readFileSync(path.join(s.out, subFile), 'utf-8'), /サブエージェントの報告/);
+    assert.match(fs.readFileSync(path.join(s.out, subFile), 'utf-8'), /Subagent report/);
   } finally { s.cleanup(); }
 });
 

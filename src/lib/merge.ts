@@ -54,50 +54,54 @@ function strictPrefix(a: string[], b: string[]): boolean {
   return true;
 }
 
-// p が既出 q の重複と確認できるか（§6.3）。3つの確認のいずれかが成立した
-// ときだけ true。それ以外は両方残す。`budget` は候補グループ毎の
-// サブシーケンス比較回数の上限。
+// Can p be confirmed as a duplicate of the already-seen q (§6.3)? True only when
+// one of the three confirmations holds; otherwise BOTH copies are kept. `budget`
+// caps the number of subsequence comparisons per candidate group.
 //
-// 安価な順に並べ替えてある: uuid（メモリ内比較）→ prefix（メモリ内比較）→
-// 全ファイルハッシュ（遅延化されたため、初回はディスク読み＋ハッシュ計算が
-// 走る）。ハッシュを最後にすることで、uuid か prefix で決着する大多数の
-// ペアはディスクに触れない。
-// 注意: どれかが成立すれば重複、という OR 判定なので並び順で真偽は変わらない
-// が、prefix 確認が先に走ることで SUBSEQUENCE_LIMIT の予算消費パターンは
-// 旧実装（uuid → ハッシュ → prefix）と異なり得る（旧実装ならハッシュで即決
-// して予算を消費しなかったペアが、本実装では prefix 確認で予算を1つ消費する）。
+// The checks are ordered cheapest first: uuid (in memory) -> prefix (in memory)
+// -> whole-file hash (now lazy, so the first call costs a disk read plus the
+// hash). Putting the hash last keeps the vast majority of pairs — settled by
+// uuid or prefix — off the disk entirely.
+// Note: this is an OR, so the order cannot change the verdict; but running the
+// prefix check first does change how the SUBSEQUENCE_LIMIT budget is spent
+// compared with the old order (uuid -> hash -> prefix). A pair the old order
+// would have settled by hash without spending budget now spends one unit on the
+// prefix check.
 //
-// 差が出力に現れる条件（すべて同時に満たす必要がある）:
-//   (1) 同一候補キー（source＋session＋質問時刻＋質問文が完全一致）のグループ
-//       内で確認が SUBSEQUENCE_LIMIT（64）回を超えて行われ、かつ
-//   (2) 予算切れ後のペアに「uuid では確認できないがファイル全体ハッシュ一致
-//       では確認できた」ものが含まれる場合。
-// このとき旧実装なら削除された重複が本実装では両方残る（出力が増える方向のみ。
-// ペアが消える方向の差は起き得ない＝データを失わない側に倒れる）。実ログ・
-// 全テストでは差は観測されていない。
+// For that difference to reach the output, all of the following must hold at
+// once:
+//   (1) within one candidate-key group (identical source + session + question
+//       timestamp + question text) more than SUBSEQUENCE_LIMIT (64)
+//       confirmations are performed, AND
+//   (2) among the pairs past the exhausted budget there is one that uuid cannot
+//       confirm but a whole-file hash match would have.
+// In that case a duplicate the old order deleted is kept twice here. The
+// difference can only ADD output; a pair can never disappear, so it fails toward
+// not losing data. No difference has been observed on real logs or in any test.
 //
-// 旧順序（ハッシュを prefix より先）に戻せば予算消費まで完全一致するが、
-// ハッシュは遅延化されたため、戻すと「prefix で決着するはずだった大多数の
-// 古いスナップショット重複」で毎回2ファイルの全読み＋ハッシュ計算が強制発火
-// し、遅延化の利得を打ち消す。安全性が keep-both 側に保たれていることを
-// 優先し、現順序を維持する（R2 レポート改善要求への回答。SPEEDUP-NOTES 参照）。
+// Restoring the old order (hash before prefix) would match the old budget
+// spending exactly, but since the hash became lazy that would force a full read
+// of two files plus a hash for the vast majority of old-snapshot duplicates that
+// the prefix check settles on its own, cancelling out the benefit of making it
+// lazy. Since the safety stays on the keep-both side, the current order stands
+// (see SPEEDUP-NOTES).
 async function confirmDuplicate(p: UnifiedPair, q: UnifiedPair, budget: { n: number }): Promise<boolean> {
   if (p.source !== q.source) return false;
-  // 1. 同一セッション ＋ 質問イベント uuid の一致。
+  // 1. Same session + matching question-event uuid.
   if (p.sessionId && p.sessionId === q.sessionId && p.questionEventUuid && p.questionEventUuid === q.questionEventUuid) {
     return true;
   }
-  // 2. 同一セッションで、片方のイベントID列がもう片方の厳密な前方 prefix
-  //    （候補グループ毎に SUBSEQUENCE_LIMIT 回まで）。
+  // 2. Same session, and one event-id stream is a strict leading prefix of the
+  //    other (up to SUBSEQUENCE_LIMIT times per candidate group).
   if (p.sessionId && p.sessionId === q.sessionId && budget.n < SUBSEQUENCE_LIMIT) {
     budget.n++;
     if (strictPrefix(p.eventIdStream, q.eventIdStream) || strictPrefix(q.eventIdStream, p.eventIdStream)) {
       return true;
     }
   }
-  // 3. 全ファイル内容ハッシュの一致（完全コピー）— 遅延ディスク読み＋ハッシュ。
-  //    '' は「確認できない」（読めない/解析後に変更された）を意味し、一致扱い
-  //    にはしない。
+  // 3. Matching whole-file content hash (a complete copy) — a lazy disk read
+  //    plus hash. '' means "cannot confirm" (unreadable, or modified after
+  //    analysis) and is never treated as a match.
   const ph = await p.fileContentHash();
   if (ph) {
     const qh = await q.fileContentHash();
@@ -148,7 +152,7 @@ export interface DedupeResult {
   // Pairs that matched a candidate key group (§6.3 dupKey) but could NOT be
   // confirmed as duplicates, so BOTH copies were kept. Surfaced via --verbose
   // as "possible duplicate" so the conservative keep-both decisions are
-  // observable (§6.3 診断要求 / r4 reports).
+  // observable (§6.3 diagnostics requirement / r4 reports).
   possibleDuplicates: number;
 }
 
@@ -157,7 +161,7 @@ export interface DedupeResult {
 // answered but the earlier kept copy is empty, the answered copy takes over the
 // earlier copy's OUTPUT POSITION (so the reader gets the complete block without
 // disturbing the deterministic order).
-// confirmDuplicate が遅延ハッシュ（非同期ディスク読み）を含むため async。
+// It is async because confirmDuplicate involves the lazy hash (an async disk read).
 export async function dedupePairs(sorted: UnifiedPair[]): Promise<DedupeResult> {
   const groups = new Map<string, { members: UnifiedPair[]; budget: { n: number } }>();
   const kept: UnifiedPair[] = [];

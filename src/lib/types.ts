@@ -78,10 +78,10 @@ export interface UnifiedPair {
   questionTimestampRaw: string;
   questionTimestampMs: number | null;
   question: string;
-  // 遅延＋メモ化: Progress の生成は Q〜A 間の全ツール入出力を JSON 文字列化
-  // する重い処理で、既定テンプレート（%Progress% も %ProgressFull% も含まない）
-  // では捨てられるだけだった。formatPair() がテンプレートに実際に参照が
-  // ある時だけ呼び出す。
+  // Lazy + memoised. Building Progress means JSON-stringifying every tool
+  // input/output between Q and A — heavy work whose result the default template
+  // (which contains neither %Progress% nor %ProgressFull%) merely threw away.
+  // formatPair() calls these only when the template actually references them.
   progressSummary: () => string;
   progressFull: () => string;
   answer: string;
@@ -91,12 +91,13 @@ export interface UnifiedPair {
   cwd: string;
   tokens: TokenTotals;
   ccxid: string;                      // internal field, rendered as "ccxlogid:<hex24>"
-  // 内部フィールド（出力されない）: SessionData から引き継ぐ論理重複排除用
-  // データ（§6.3）。fileContentHash は遅延＋メモ化の非同期アクセサで、§6.3 の
-  // 確認が実際に必要とした時だけファイルを読み直してハッシュする（ほぼ発火
-  // しない）。旧実装のように毎回全ログバイトをハッシュしない。eventIdStream は
-  // 生の "type\0id" 文字列列（strictPrefix は要素等価比較なので、旧実装の
-  // 要素毎 SHA-256 と判別力は同一。1行毎の暗号学的ハッシュ代を払わない）。
+  // Internal fields (never rendered): the logical-dedupe data inherited from
+  // SessionData (§6.3). fileContentHash is a lazy, memoised async accessor that
+  // re-reads and hashes the file only when a §6.3 confirmation actually needs it
+  // (almost never) — unlike the old implementation, which hashed every log byte
+  // every time. eventIdStream holds the raw "type\0id" strings; strictPrefix
+  // compares elements for equality, so its discriminating power is identical to
+  // the old per-element SHA-256 without paying for a cryptographic hash per line.
   fileContentHash: () => Promise<string>;
   eventIdStream: string[];
   // Internal (not rendered): globally-unique message uuids used to drop
@@ -119,4 +120,8 @@ export interface CliOptions {
   backupMd: boolean;
   lock: boolean;
   forceUnlock: boolean;
+  // watch (watch-spec §3). `watch` records whether --watch was given;
+  // `watchDurationSeconds` is the run duration D (null means unlimited).
+  watch: boolean;
+  watchDurationSeconds: number | null;
 }

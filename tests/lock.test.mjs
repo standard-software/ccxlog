@@ -39,7 +39,7 @@ test('a live lock is respected without --force-unlock; release lets re-acquire s
   await releaseLock(third.handle);
 });
 
-test('a same-host dead-PID lock is auto-reclaimed (§8.6 明白に安全)', async t => {
+test('a same-host dead-PID lock is auto-reclaimed when unambiguously safe (§8.6)', async t => {
   const out = tmpOut(t);
   const stale = {
     host: os.hostname(),

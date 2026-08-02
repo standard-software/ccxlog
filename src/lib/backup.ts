@@ -8,9 +8,10 @@ import type { Source } from './types.js';
 
 export const BACKUP_JSONL_DIR = 'backup_jsonl';
 export const BACKUP_MD_DIR = 'backup_CCXLOG_md';
-// 自動バックアップ（ID 消失を検知した書き換え直前の退避）の保存先は、手動
-// --backup-md と別のフォルダに分ける（v1.5.0）。「_auto に何か増えた＝ペアが
-// 消える変化があったシグナル」を手動バックアップの蓄積と混ぜないため。
+// Automatic backups (the copy taken just before a rewrite where id loss was
+// detected) go to a folder separate from the manual --backup-md one (v1.5.0), so
+// that "something new appeared in _auto = a signal that pairs were about to
+// disappear" is not buried in the pile of manual backups.
 export const BACKUP_MD_AUTO_DIR = 'backup_CCXLOG_md_auto';
 
 export function backupHostName(): string {
@@ -30,14 +31,16 @@ export function backupFolderName(d: Date): string {
 export interface JsonlBackupItem {
   filePath: string;
   source: Source;
-  relPath: string;    // 探索ルートからの相対パス（バックアップ内で構造を保存する）
+  relPath: string;    // path relative to the discovery root (structure is preserved in the backup)
 }
 
 // Copy discovered source JSONL into backup_jsonl/<stamp>/<cc|cx>/ unchanged,
 // preserving each file's root-relative path (v1.5.0):
-//   cc/<セッションID>.jsonl と cc/<セッションID>/subagents/agent-*.jsonl
-//   （ライブのログ配置のミラー。extraLogDirs に cc/ を指せばライブと同じ挙動）
-//   cx/<年>/<月>/<日>/rollout-*.jsonl（日付ツリーを保存。codex extra は再帰探索）
+//   cc/<session id>.jsonl and cc/<session id>/subagents/agent-*.jsonl
+//   (a mirror of the live log layout, so pointing extraLogDirs at cc/ behaves
+//   exactly like the live tree)
+//   cx/<year>/<month>/<day>/rollout-*.jsonl (the date tree is preserved; a codex
+//   extra root is scanned recursively)
 // Returns count. Throws on the first copy failure after reporting.
 export async function backupJsonlFiles(
   items: JsonlBackupItem[],
@@ -52,7 +55,8 @@ export async function backupJsonlFiles(
     const sub = it.source === 'claude' ? 'cc' : 'cx';
     if (!used.has(sub)) used.set(sub, new Set());
     const seen = used.get(sub)!;
-    // 別ルート由来で相対パスが衝突した場合はハッシュ付き名に退避（上書き防止）
+    // When files from different roots collide on their relative path, fall back
+    // to a hashed name so neither overwrites the other.
     let rel = it.relPath;
     if (seen.has(rel)) {
       rel = rel.replace(/\.jsonl$/, `__${sha256HexBytes(it.filePath, 8)}.jsonl`);

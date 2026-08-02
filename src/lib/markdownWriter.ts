@@ -186,8 +186,8 @@ export function toUnifiedPair(p: UnifyParams): UnifiedPair {
     questionTimestampRaw: raw,
     questionTimestampMs: Number.isNaN(ms) ? null : ms,
     question: buildQuestion(pair),
-    // 遅延生成: テンプレートが %Progress%/%ProgressFull% を参照する時だけ
-    // 構築する（既定テンプレートはどちらも参照しない）。ペア毎にメモ化。
+    // Built lazily: only when the template references %Progress% / %ProgressFull%
+    // (the default template references neither). Memoised per pair.
     progressSummary: (() => {
       let memo: string | null = null;
       return () => (memo ??= buildProgress(pair, false));
@@ -218,9 +218,9 @@ export function formatPair(u: UnifiedPair, template: string): string {
     SessionId: u.sessionId,
     SessionName: u.sessionName,
     Question: u.question,
-    // テンプレートが実際に参照する時だけ Progress を構築する（'%Progress%' は
-    // '%ProgressFull%' の部分文字列ではない — 閉じ '%' が異なるため、この
-    // includes 判定で両者を正しく区別できる）。
+    // Progress is built only when the template really references it. ('%Progress%'
+    // is not a substring of '%ProgressFull%' — the closing '%' differs — so these
+    // includes checks distinguish the two correctly.)
     Progress: template.includes('%Progress%') ? u.progressSummary() : '',
     ProgressFull: template.includes('%ProgressFull%') ? u.progressFull() : '',
     Answer: u.answer,
@@ -341,9 +341,10 @@ async function atomicWrite(filePath: string, content: string): Promise<void> {
   throw lastErr;
 }
 
-// 自動バックアップ（backupRequired）は書き換え（rewrite）のうち「書き換え前に
-// 存在した ccxlogid が新内容から1つでも失われるもの」だけに付く（v1.4.0 R2、
-// isDestructive 参照）。判定不能時は安全側＝バックアップする。
+// An automatic backup (backupRequired) is attached only to a rewrite in which at
+// least one ccxlogid present before the rewrite is missing from the new content
+// (v1.4.0 R2; see isDestructive). When the answer cannot be determined, it fails
+// toward taking the backup.
 export type WriteResult = 'create' | 'noop' | 'append' | 'rewrite';
 
 // ---- write planning + commit (§8.5) --------------------------------------
@@ -369,7 +370,7 @@ export interface WritePlan {
   kind: 'aggregate' | 'session';
   newContent: string;
   outcome: WriteResult;
-  backupRequired: boolean;              // rewrite のうち ccxlogid 消失（判定不能含む）時のみ true
+  backupRequired: boolean;              // true only for a rewrite that loses a ccxlogid (or cannot be decided)
   appendTail: string;                   // only meaningful for 'append'
   fingerprint: FileFingerprint | null;  // existing file at plan time (null if absent)
 }
@@ -437,12 +438,14 @@ export async function planWrite(
   } else {
     outcome = 'rewrite';
   }
-  // 自動バックアップは「会話ペア消失事故を防ぐ最後の砦」（v1.4.0 R2）:
-  // 書き換えのうち、旧内容にあった ccxlogid が新内容から1つでも失われる
-  // 場合のみ発火する。本文差し替え・途中挿入・並び順変更・テンプレート
-  // 変更など ID が全て保たれる書き換えはバックアップしない。判定不能
-  // （旧に有効 ID なし／不正形式／重複／新側の解析失敗 = method 'none'）は
-  // isDestructive が true を返し、安全側＝バックアップする。
+  // The automatic backup is the last line of defence against losing conversation
+  // pairs (v1.4.0 R2): it fires only for a rewrite in which at least one
+  // ccxlogid present in the old content is missing from the new one. Rewrites
+  // that preserve every id — replaced body text, an insertion in the middle,
+  // reordering, a template change — are not backed up. When the answer cannot be
+  // decided (no valid id in the old content, malformed ids, duplicates, or a
+  // failed parse of the new side = method 'none') isDestructive returns true and
+  // the backup is taken, which is the safe direction.
   const backupRequired = outcome === 'rewrite' && isDestructive(ex.content, newContent, method);
   return { ok: true, plan: { filePath, kind, newContent, outcome, backupRequired, appendTail, fingerprint: ex.fp } };
 }

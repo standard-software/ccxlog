@@ -3,6 +3,7 @@ import path from 'node:path';
 import type { CcxlogConfig } from '../../lib/config.js';
 import { encodeCwd, getClaudeProjectsDir, sha256HexBytes, canonicalPathString, canonicalPath, isPathWithin, buildRelativeId } from '../../lib/pathUtils.js';
 import type { SourceAdapter, RootRef, DiscoveredFile, SessionData, FilterContext } from '../adapter.js';
+import { applyProgressRetention } from '../../lib/progressData.js';
 import { readJsonl } from './jsonlReader.js';
 import { buildPairs, extractSessionName } from './pairBuilder.js';
 
@@ -114,7 +115,13 @@ export const claudeAdapter: SourceAdapter = {
 
   async readSession(file: DiscoveredFile, cfg: CcxlogConfig): Promise<SessionData> {
     const r = await readJsonl(file.filePath);
-    const pairs = buildPairs(r.entries, { includeSidechain: cfg.claude.includeSidechain });
+    // Progress data is discarded AFTER buildPairs() — that is, after
+    // slash-command bodies have been recovered (see the rationale in
+    // lib/progressData.ts).
+    const pairs = applyProgressRetention(
+      buildPairs(r.entries, { includeSidechain: cfg.claude.includeSidechain }),
+      cfg,
+    );
     return {
       source: 'claude',
       // Claude session id is ALWAYS path-based (log-internal sessionId would

@@ -131,7 +131,7 @@ test('codex: two same-timestamp same-content fallbacks WITHOUT a stable id are B
   // per-item id, so a resend and a genuine repeat (same text typed twice in the
   // same millisecond) are indistinguishable. When no verified id is present the
   // reader must NOT prune on (timestamp, content) — both must survive (§6.2
-  // "確定できなければ残す").
+  // "keep it unless you can prove otherwise").
   const { dir, file } = codexFixture([
     { type: 'session_meta', timestamp: '2026-05-27T11:00:00Z', payload: { session_id: 's', cwd: '/p', cli_version: '1' } },
     { type: 'turn_context', timestamp: '2026-05-27T11:00:00Z', payload: { turn_id: 't1', cwd: '/p', model: 'gpt-5' } },

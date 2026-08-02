@@ -209,9 +209,10 @@ export function buildPairs(entries: LogEntry[], options: BuildPairsOptions = {})
           finalAssistantEntry: null,
         };
       } else if (e.parentUuid && e.parentUuid === current.questionEntry.parentUuid) {
-        // キャンセル＋打ち直し（同じ parentUuid からの兄弟フォーク）: 置換せず、
-        // 打ち直し前の質問を「回答なしの独立ペア」として確定してから新ペアを
-        // 開始する（v1.4.0 R1）。A→B→C 連続キャンセルでも繰り返し成立する。
+        // Cancel and retype (a sibling fork from the same parentUuid): rather
+        // than replacing it, finalise the pre-retype question as a standalone
+        // pair with no answer, then start the new pair (v1.4.0 R1). This holds
+        // repeatedly across an A->B->C run of cancellations.
         pairs.push(current);
         current = {
           questionEntry: e,

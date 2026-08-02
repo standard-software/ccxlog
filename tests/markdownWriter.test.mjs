@@ -66,7 +66,6 @@ test('smart-write: same-id reworded body is a rewrite WITHOUT a backup (v1.4.0 R
     const reworded = agg(`<!-- ccxlogid:${A} -->\n# 2026/05/27 Wed 11:03:49\nDIFFERENT body\n\n`);
     const plan = (await planWrite(file, reworded, 'aggregate')).plan;
     assert.equal(plan.outcome, 'rewrite');
-    // ccxlogid が全て保たれる書き換えは自動バックアップの対象外。
     assert.equal(plan.backupRequired, false);
   } finally { rmrf(dir); }
 });
@@ -244,8 +243,6 @@ test('progress: summary vs full render independently (thinking only in the full 
     sourceFile: '/x.jsonl', sourceFileRelativeId: 'claude/standard/std/x.jsonl',
     fileContentHash: async () => '', eventIdStream: [], questionOrdinal: 0,
   });
-  // Thinking は full 側にだけ現れ、summary には決して現れない。
-  // （progressSummary/progressFull は遅延アクセサになった。）
   assert.doesNotMatch(u.progressSummary(), /Thinking|secret reasoning/);
   assert.match(u.progressFull(), /Thinking/);
   assert.match(u.progressFull(), /secret reasoning/);

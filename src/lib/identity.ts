@@ -159,13 +159,15 @@ export function idsByMethod(content: string, method: BlockMethod): string[] {
   return [];
 }
 
-// 破壊的書き換え = 旧内容にあったブロック ID が新内容から1つでも失われること。
-// 自動バックアップ発火の唯一の条件（v1.4.0 R2）。method 'none'（旧に有効 ID
-// なし／不正形式 ID／重複 ID／新側の解析失敗）は判定不能なので、安全側＝
-// 破壊的とみなしてバックアップさせる。ID が全て保たれる限り、本文差し替え・
-// 途中挿入・並び順変更・テンプレート変更は破壊的としない。
+// A destructive rewrite = at least one block id present in the old content is
+// missing from the new content. That is the ONLY trigger for an automatic backup
+// (v1.4.0 R2). Method 'none' (no valid id in the old content, malformed ids,
+// duplicate ids, or a failed parse of the new side) cannot be decided, so it is
+// treated as destructive — the safe direction — and a backup is taken. As long
+// as every id survives, replacing body text, inserting in the middle,
+// reordering, and changing the template all count as non-destructive.
 export function isDestructive(oldContent: string, newContent: string, method: BlockMethod): boolean {
-  if (method === 'none') return true; // 判定不能 -> 安全側でバックアップ
+  if (method === 'none') return true; // undecidable -> back up, the safe direction
   const newIds = new Set(idsByMethod(newContent, method));
   for (const id of idsByMethod(oldContent, method)) {
     if (!newIds.has(id)) return true;

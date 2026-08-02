@@ -12,21 +12,25 @@ export function sha256HexBytes(input: string | Buffer, digits: number): string {
   return sha256Hex(input).slice(0, digits);
 }
 
-// 解析時点のファイル状態。遅延ハッシュとプリフィルタの「同一ファイルの
-// まま変わっていないか」照合に使う。size/mtime に加えて dev/ino を持つ:
-// size/mtime だけでは「同サイズ・mtime 保存付きの別内容ファイルでの置換」
-// （cp -p 相当の rename 置換や、mtime 粒度の粗いファイルシステムでの同サイズ
-// 書換）を検出できず、解析した内容と異なる内容のハッシュで重複を確定して
-// 正当なペアを削除し得る（R2 レポート指摘。データを失う側に倒れる唯一の
-// 残存経路だった）。dev/ino を含めれば rename 置換で実体が変わったことを
-// 検出できる（ino が取れないファイルシステムでは 0 同士の比較になり
-// size/mtime のみと同等へ自然に縮退する）。
-// 既知の限界（理論経路）: 同一 inode のまま同サイズで内容を書き換え、かつ
-// mtime を元の値へ復元する in-place 改変は、この4属性照合では検出できない。
-// 完全に塞ぐには照合のたびに内容指紋（部分ハッシュ等）の再読みが必要で、
-// 「滅多に発火しない経路以外ではファイルを読まない」という本高速化の前提を
-// 崩すため採らない。通常のログ書き込み（追記）では発生せず、mtime を意図的に
-// 復元する外部操作が要る（設計判断。SPEEDUP-NOTES §7 にも記載）。
+// A file's state at analysis time, used by the lazy hash and by the prefilter to
+// check "is this still the same, unchanged file?". It carries dev/ino as well as
+// size/mtime: size and mtime alone cannot detect a replacement by a
+// different-content file of the same size with its mtime preserved (a `cp -p`
+// style rename replacement, or a same-size rewrite on a filesystem with coarse
+// mtime granularity). That would let a hash of content OTHER than what was
+// analysed confirm a duplicate and delete a legitimate pair — the one remaining
+// path that failed toward LOSING data. Including dev/ino detects that the
+// underlying object changed across a rename replacement (on filesystems without
+// inode numbers the comparison is 0 against 0, degrading naturally to
+// size/mtime only).
+// Known limit (theoretical): an in-place edit that keeps the same inode and
+// size and restores the original mtime is invisible to this four-attribute
+// check. Closing it entirely would mean re-reading a content fingerprint (a
+// partial hash, say) on every comparison, which would break the premise this
+// speedup rests on — never read a file outside the rarely-taken paths. Ordinary
+// log writing (appending) does not produce such an edit; producing one takes
+// deliberate external mtime restoration. Design decision, also recorded in
+// SPEEDUP-NOTES §7.
 export interface FileSnapshot {
   size: number;
   mtimeMs: number;
@@ -47,24 +51,27 @@ export function sameSnapshot(a: FileSnapshot, b: FileSnapshot): boolean {
   return a.size === b.size && a.mtimeMs === b.mtimeMs && a.dev === b.dev && a.ino === b.ino;
 }
 
-// 遅延ハッシュのストリーム読みチャンク。既定の 64KB は R1 で「遅い」ことを
-// 実証済みの値なので、ハッシュ経路にも大きめのチャンクを明示する（滅多に
-// 発火しない経路だが、読込パスの知見と不整合を残さない。R2 レポート指摘）。
+// Stream chunk size for the lazy hash. R1 demonstrated that the 64KB default is
+// slow, so the hash path states a larger chunk explicitly too — it fires rarely,
+// but leaving it inconsistent with what we learned about the read path would be
+// a trap.
 export const HASH_READ_CHUNK_BYTES = 1024 * 1024;
 
-// 遅延・メモ化された全ファイル SHA-256（§6.3 重複確認「ファイル全体の完全
-// コピー」用）。このハッシュは「候補キーが一致し、かつ安価な確認では決着
-// しなかった」ペアでのみ必要になる＝実運用ではほぼ発火しないため、通常の
-// 読込パスでは計算しない（旧実装は毎回、全ログバイトを読込と同時にハッシュ
-// していた）。
-// - 計算は非同期ストリーミング。readFileSync の一括読みはファイル全体を
-//   メモリへ載せ（350MB 級で §12.3 の設計方針に反する）、イベントループも
-//   止めるため不採用（R1 両レポートの指摘）。
-// - TOCTOU 対策: 解析時に取得した snapshot（size/mtime/dev/ino）と、ハッシュ
-//   計算の直前・直後の stat を照合する。解析後に変更・置換されたファイル
-//   （ハッシュ計算中の追記を含む）は '' を返し「重複と確認しない」。これは
-//   従来の「ハッシュ無し」と同じ保守的挙動で、両方残す側に倒れる。
-// - 読めないファイルも同様に ''（= 重複と確認しない）。
+// Lazy, memoised whole-file SHA-256, for the §6.3 duplicate check's "is this a
+// complete copy of the file?" question. The hash is needed only for pairs whose
+// candidate keys matched AND that the cheap checks failed to settle — in
+// practice almost never — so it is not computed on the normal read path (the old
+// implementation hashed every log byte while reading, every time).
+// - It is computed by async streaming. A readFileSync slurp would put the whole
+//   file in memory (against the §12.3 design rule at the 350MB scale) and stall
+//   the event loop, so it is not used.
+// - TOCTOU protection: the snapshot taken at analysis time (size/mtime/dev/ino)
+//   is compared against a stat immediately before and after hashing. A file
+//   modified or replaced after analysis — including an append during hashing —
+//   returns '', i.e. "not confirmed as a duplicate". That is the same
+//   conservative behaviour as having no hash at all, and fails toward keeping
+//   both copies.
+// - An unreadable file likewise returns '' (not confirmed as a duplicate).
 export function lazyFileSha256(filePath: string, expected: FileSnapshot): () => Promise<string> {
   let memo: Promise<string> | null = null;
   return () => (memo ??= hashFileGuarded(filePath, expected));
@@ -129,6 +136,47 @@ export async function canonicalPath(p: string): Promise<string> {
   return canon;
 }
 
+// Drop the memo at a watch cycle boundary. For a single run ("one process = one
+// run") the memo's lifetime equals the run, which was harmless; under watch, a
+// realpath resolution would otherwise be frozen for the process's lifetime and
+// two things would stop taking effect no matter how many cycles pass:
+//   - a path that did not exist at resolution time (where the catch above
+//     accepted the resolve() result as final) later gaining a real target
+//   - a symlink / junction being re-pointed
+// Both are situations where belonging (filterSession / the cwd prefilter) SHOULD
+// change without any config change, and they are a miss path independent of the
+// incremental re-parse cache. realpath is called at most once per distinct
+// target cwd per cycle, so the cost is small: drop the memo at the start of each
+// cycle and resolve afresh.
+export function clearCanonicalPathCache(): void {
+  canonicalCache.clear();
+}
+
+// The external path resolution an "excluded" outcome depended on (for the
+// incremental re-parse cache). `raw` is the raw path string the decision used (a
+// cwd inside a Codex log, say) and `canon` is what canonicalPath() returned that
+// cycle. Even with a file's four attributes unchanged, re-pointing a symlink /
+// junction along `raw` changes `canon` — and can change the outcome. Exclusion
+// outcomes hold no raw data and cannot be rescued later, so this dependency is
+// carried explicitly and verified every cycle.
+export interface PathDep {
+  raw: string;
+  canon: string;
+}
+
+// Check that a recorded resolution still holds. canonicalPath() is memoised
+// within a cycle and the memo is dropped at the start of each one, so the real
+// realpath calls stay at "once per distinct raw per cycle".
+// An unresolvable path makes canonicalPath() return the resolve() result, so a
+// vanished link also shows up as a mismatched canon — meaning re-scan, the safe
+// direction.
+export async function pathDepsUnchanged(deps: readonly PathDep[]): Promise<boolean> {
+  for (const d of deps) {
+    if (await canonicalPath(d.raw) !== d.canon) return false;
+  }
+  return true;
+}
+
 // String canonicalization without touching the filesystem (for non-existent
 // paths / stableRootKey). resolve -> normalize -> win32 lowercase.
 export function canonicalPathString(p: string): string {
@@ -144,17 +192,21 @@ export function isPathWithin(filePath: string, rootPath: string): boolean {
 }
 
 // Physical-file identity key: dev+ino when available, else canonical path.
+// `snapshot` holds the four attributes derived from that same stat and feeds the
+// identity check of the incremental re-parse cache (lib/analysisCache.ts).
+// Because it is taken at discovery time — before reading — a file that changes
+// during or after the read is guaranteed to surface as a mismatch next cycle,
+// i.e. it fails toward re-reading, the safe direction.
 export interface FileIdentity {
   key: string;
-  size: number;
-  mtimeMs: number;
+  snapshot: FileSnapshot;
 }
 
 export async function fileIdentity(filePath: string): Promise<FileIdentity | null> {
   try {
     const st = await fs.stat(filePath);
     const key = st.ino !== 0 ? `dev:${st.dev}:ino:${st.ino}` : canonicalPathString(filePath);
-    return { key, size: st.size, mtimeMs: st.mtimeMs };
+    return { key, snapshot: { size: st.size, mtimeMs: st.mtimeMs, dev: st.dev, ino: st.ino } };
   } catch {
     return null;
   }
