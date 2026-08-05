@@ -11,6 +11,10 @@ import {
   useTemplate, normalize, SLASH_FULL_BODY, CODEX_ROLLOUT_NAME,
 } from './progressFixture.mjs';
 
+const watchTest = process.env.CCXLOG_SKIP_WATCH_TESTS === '1'
+  ? (name, fn) => test(name, { skip: 'Run with npm run test:watch' }, fn)
+  : test;
+
 function pathToUrl(p) {
   return new URL(`file:///${p.replace(/\\/g, '/')}`).href;
 }
@@ -508,7 +512,7 @@ async function waitForOutput(ws, fileName, expectedHash, timeoutMs = 40000) {
   }
 }
 
-test('P-6: switching templates during watch always produces correct output', async (t) => {
+watchTest('P-6: switching templates during watch always produces correct output', async (t) => {
   const ws = fixtureWorkspace(t);
   clearMd(ws.out);
   useTemplate(ws.out, 'none');

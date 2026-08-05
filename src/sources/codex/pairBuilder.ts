@@ -26,7 +26,16 @@ export function buildPairs(entries: LogEntry[]): Pair[] {
         if (current) current.progressEntries.push(entry);
         continue;
       }
-      if (current && (current.finalAssistantEntry || current.progressEntries.length > 0)) {
+      // An instruction handed to a subagent ALWAYS opens its own pair, even
+      // when the pair before it has neither an answer nor any progress
+      // (jsonlReader.ts sets isReceivedInstruction). Two things break without
+      // this: an unanswered question inherited from the parent absorbs the
+      // instruction, which changes the pair's replay identity and leaks the
+      // inherited question back into the output; and two instructions arriving
+      // back to back — which real parent rollouts contain — collapse into one
+      // block.
+      if (current && (entry.isReceivedInstruction
+        || current.finalAssistantEntry || current.progressEntries.length > 0)) {
         pairs.push(current);
         current = null;
       }

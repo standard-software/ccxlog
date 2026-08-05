@@ -21,6 +21,7 @@ import {
   formatTokens,
 } from './metaExtractor.js';
 import { encodeSid64, chooseMethod, regionFromLine, isDestructive } from './identity.js';
+import { answerTextHashes, progressSignatureOf, replayIdentityOf } from './replayKey.js';
 import { sha256Hex } from './pathUtils.js';
 import type {
   Pair, UserEntry, AssistantEntry, ContentBlock, Source, SourceLabel, SourceMode, UnifiedPair,
@@ -160,6 +161,20 @@ export function toUnifiedPair(p: UnifyParams): UnifiedPair {
   const { pair } = p;
   const raw = pair.questionEntry.timestamp ?? '';
   const ms = raw ? Date.parse(raw) : NaN;
+  // Inherited-history material (lib/replayKey.ts). Codex only: a Claude entry
+  // carries none of it, and computing it for the thousands of Claude pairs a
+  // run holds would be pure waste.
+  const identity = p.source === 'codex' ? replayIdentityOf(pair) : { key: '', textHash: '' };
+  // The progress signature is lazy for the same reason %Progress% itself is:
+  // only the few hundred pairs that turn out to be replay candidates ever need
+  // it, and building it for every pair of every run would undo that saving.
+  let progressSignatureMemo: string[] | null = null;
+  const replay = {
+    replayKey: identity.key,
+    replayTextHash: identity.textHash,
+    answerTextHashes: p.source === 'codex' ? answerTextHashes(pair) : [],
+    progressSignature: () => (progressSignatureMemo ??= progressSignatureOf(pair)),
+  };
   // Cross-session dedupe keys (§6.3). Real Claude message UUIDs are globally
   // unique, so a uuid shared across sessions marks a resumed/forked copy of the
   // same turn. We collect the question uuid, the steering follow-up uuids, and
@@ -206,6 +221,10 @@ export function toUnifiedPair(p: UnifyParams): UnifiedPair {
     fileContentHash: p.fileContentHash,
     eventIdStream: p.eventIdStream,
     forkKeys,
+    // Codex only: Claude entries carry none of the replay material, and
+    // building the identity for them would be 2,400 pointless hashes per run.
+    ...replay,
+    progressEntryCount: pair.progressEntries.length,
   };
 }
 

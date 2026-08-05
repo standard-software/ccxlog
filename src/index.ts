@@ -47,8 +47,9 @@ import {
 import { createWarningReporter, type WarningReporter } from './lib/watchWarnings.js';
 import { claudeAdapter } from './sources/claude/index.js';
 import { codexAdapter } from './sources/codex/index.js';
+import { legacySessionIds, removeInheritedHistory } from './sources/codex/inheritedHistory.js';
 import type { SourceAdapter, RootRef, DiscoveredFile, SessionData, FilterContext } from './sources/adapter.js';
-import type { CliOptions, UnifiedPair, SourceMode } from './lib/types.js';
+import type { CliOptions, UnifiedPair, Source, SourceMode } from './lib/types.js';
 
 const PKG_VERSION = (createRequire(import.meta.url)('../package.json') as { version: string }).version;
 
@@ -498,7 +499,6 @@ async function run(
   }
 
   // Build UnifiedPairs for each session (questionOrdinal = index in filtered pairs).
-  const allPairs: UnifiedPair[] = [];
   const sessionUnified: SessionUnified[] = [];
   for (const ar of adapterRuns) {
     for (const s of ar.sessions) {
@@ -515,9 +515,18 @@ async function run(
         questionOrdinal: i,
       }));
       sessionUnified.push({ session: s, adapter: ar.adapter, pairs: ups });
-      allPairs.push(...ups);
     }
   }
+
+  // Drop the parent conversation a Codex subagent re-recorded into its own
+  // rollout (sources/codex/inheritedHistory.ts). This runs BEFORE the output
+  // mode is chosen — per-session output has no cross-session dedupe of its own,
+  // so deciding later would apply the removal to aggregate output alone — and
+  // before ccxlogids are assigned, since the ids depend on which pairs survive.
+  const inherited = removeInheritedHistory(sessionUnified);
+
+  const allPairs: UnifiedPair[] = [];
+  for (const su of sessionUnified) allPairs.push(...su.pairs);
   assignCcxids(allPairs);
 
   // Template diagnostics (all modes).
@@ -543,6 +552,20 @@ async function run(
       for (const r of ar.roots) out.error(`  - [${ar.adapter.id}] ${r.dir}`);
     }
     return fail('no pairs collected (no Claude Code / Codex sessions matched this project yet)');
+  }
+
+  // Always reported, not only under --verbose: this is the one line that tells
+  // a user why their Codex block count dropped after upgrading. `conflicts`
+  // names the replays that were KEPT because the child's copy held an answer or
+  // progress the ancestor could not absorb — the case where a silent removal
+  // would lose content.
+  if (inherited.removed > 0 || inherited.conflicts > 0) {
+    out.log(`Removed ${inherited.removed} pair(s) of parent history re-recorded into subagent sessions`
+      + `${inherited.merged > 0 ? ` (merged data from ${inherited.merged} into surviving pairs)` : ''}`
+      + `${inherited.conflicts > 0 ? `; kept ${inherited.conflicts} the original could not absorb` : ''}.`);
+    if (opts.verbose) {
+      for (const note of inherited.conflictNotes) out.log(`  kept (differing ${note})`);
+    }
   }
 
   if (!opts.dryRun) await fs.mkdir(opts.outDir, { recursive: true });
@@ -628,7 +651,20 @@ async function writeAggregate(
 interface SessionUnified { session: SessionData; adapter: SourceAdapter; pairs: UnifiedPair[]; }
 
 interface WriteTask { su: SessionUnified; filePath: string; fileName: string; content: string; }
-interface DeleteTask { su: SessionUnified; filePath: string; }
+// `expectSessionId` is the session id the file's own owner marker must carry
+// for the deletion to be allowed. It is the session's current id for a session
+// that lost all its pairs, and the OLD (pre-split) id for the leftover of a
+// subagent that used to be filed under its parent's id.
+//
+// `expectSourcePath` is set for the legacy case only, and is the log the file
+// must name as the one it was generated from. See sessionDeletable().
+interface DeleteTask {
+  su: SessionUnified;
+  filePath: string;
+  expectSessionId: string;
+  legacy?: boolean;
+  expectSourcePath?: string;
+}
 
 async function writePerSession(
   opts: CliOptions,
@@ -643,7 +679,10 @@ async function writePerSession(
     const prefix = su.adapter.sessionFilePrefix(config);
     const fileName = `${prefix}${safeSessionId(su.session.sessionId, su.session.sourceFileRelativeId)}.md`;
     const filePath = path.join(opts.outDir, fileName);
-    if (su.pairs.length === 0) { deleteCandidates.push({ su, filePath }); continue; }
+    if (su.pairs.length === 0) {
+      deleteCandidates.push({ su, filePath, expectSessionId: su.session.sessionId });
+      continue;
+    }
     const sorted = [...su.pairs].sort(compareUnifiedPairs);
     const preamble = buildSessionPreamble(su.adapter.id, su.adapter.label, su.session.sessionId, su.session.jsonlPath, opts.projectPath);
     const content = preamble + sorted.map(p => formatPair(p, config.template)).join('');
@@ -655,6 +694,38 @@ async function writePerSession(
   // matching — otherwise cclog_ABC.md and cclog_abc.md would silently overwrite
   // each other (symmetric with the aggregate-name check in config.ts).
   const foldName = (s: string) => (process.platform === 'win32' ? s.toLowerCase() : s);
+
+  // Leftovers of the old naming (§ requirement 8). A Codex subagent used to be
+  // filed under its PARENT's id — which is also why two children of one parent
+  // collided on a single name and failed the run. Now that each writes under
+  // its own thread id, the file under the old name is an orphan nobody rewrites
+  // again.
+  //
+  // The id by itself cannot authorise removing it. `cxlog_<parent>.md` marked
+  // `codex:<parent>` is ALSO what the parent session's own output looks like,
+  // and "no session in this run carries that id" is true whenever the parent
+  // rollout merely fell outside this run — a narrower extraCwds, a different
+  // --out, an aged-out log. Deleting on that alone throws away a live session's
+  // output and breaks the rule that a run never touches files belonging to
+  // sessions it did not see. What the file was GENERATED FROM is checked as
+  // well (sessionDeletable): only a file naming this very subagent's rollout is
+  // provably this subagent's own output under its old name. Everything else is
+  // kept, and listed under --verbose.
+  const claimedNames = new Set(writeTasks.map(t => foldName(t.filePath)));
+  const liveSessionIds = new Set(sessionUnified.map(su => su.session.sessionId));
+  const legacySeen = new Set<string>();
+  for (const [su, legacyId] of legacySessionIds(sessionUnified)) {
+    if (liveSessionIds.has(legacyId)) continue;      // the ancestor rollout still owns that file
+    const name = `${su.adapter.sessionFilePrefix(config)}${safeSessionId(legacyId, su.session.sourceFileRelativeId)}.md`;
+    const filePath = path.join(opts.outDir, name);
+    const key = foldName(filePath);
+    if (claimedNames.has(key) || legacySeen.has(key)) continue;
+    legacySeen.add(key);
+    deleteCandidates.push({
+      su, filePath, expectSessionId: legacyId, legacy: true,
+      expectSourcePath: su.session.jsonlPath,
+    });
+  }
   const byName = new Map<string, WriteTask[]>();
   for (const t of writeTasks) {
     const key = foldName(t.fileName);
@@ -682,7 +753,9 @@ async function writePerSession(
   // Plan deletions (§9.7): only files that satisfy every condition.
   const deletes: DeleteTask[] = [];
   for (const dc of deleteCandidates) {
-    if (await sessionDeletable(dc.filePath, dc.su)) deletes.push(dc);
+    if (await sessionDeletable(dc.filePath, dc.su.adapter.id, dc.expectSessionId, dc.expectSourcePath)) {
+      deletes.push(dc);
+    }
   }
 
   // Backup stage: every rewrite marked backupRequired (only when ccxlogid is
@@ -741,28 +814,45 @@ async function writePerSession(
     out.log(`[${su.adapter.id}:${idShort}] ${su.pairs.length} pair(s) [${commit.result}]${skipNote}`);
   }
 
-  // Deletions (already backed up above).
+  // Deletions (already backed up above). A leftover of the old naming is
+  // reported by its file name, not by the session id of the subagent that
+  // brought it to attention — the two differ, and printing the session id would
+  // read as if the wrong file were being removed.
   const deletableSet = new Set(deletes.map(d => d.filePath));
+  const deleteLabel = (d: DeleteTask) => (d.legacy
+    ? `[${d.su.adapter.id}:${path.basename(d.filePath)}] superseded name`
+    : `[${d.su.adapter.id}:${d.su.session.sessionId.slice(0, 8)}] 0 pair(s)`);
   for (const d of deletes) {
-    const idShort = d.su.session.sessionId.slice(0, 8);
     if (opts.dryRun) {
       removedFiles++;
-      out.log(`[${d.su.adapter.id}:${idShort}] 0 pair(s) (would remove file)`);
+      out.log(`${deleteLabel(d)} (would remove file)`);
       continue;
     }
     try {
       await fs.unlink(d.filePath);
       removedFiles++;
       updated.push(path.basename(d.filePath));
-      out.log(`[${d.su.adapter.id}:${idShort}] 0 pair(s) (file removed)`);
+      out.log(`${deleteLabel(d)} (file removed)`);
     } catch {
       hadError = true;
       notUpdated.push(path.basename(d.filePath));
-      out.log(`[${d.su.adapter.id}:${idShort}] 0 pair(s) (removal failed)`);
+      out.log(`${deleteLabel(d)} (removal failed)`);
     }
   }
   for (const dc of deleteCandidates) {
     if (deletableSet.has(dc.filePath)) continue;
+    if (dc.legacy) {
+      // Two very different things reach this line: the old name is simply not
+      // there (the normal case, and not worth reporting), or a file IS there
+      // and was refused. Only the second is worth a word, and only under
+      // --verbose, since the refusal is the safe outcome and needs no action —
+      // but "which superseded name did this run decline to touch" has to be
+      // answerable when a user asks why a stale file is still around.
+      if (opts.verbose && await fileExists(dc.filePath)) {
+        out.log(`[${dc.su.adapter.id}:${path.basename(dc.filePath)}] superseded name (kept: not provably this session's own output)`);
+      }
+      continue;
+    }
     const idShort = dc.su.session.sessionId.slice(0, 8);
     out.log(`[${dc.su.adapter.id}:${idShort}] 0 pair(s) (kept)`);
   }
@@ -790,16 +880,53 @@ async function writePerSession(
   });
 }
 
-// §9.7: a 0-pair session file may be deleted only when ALL conditions hold.
-// Same source selected + session belongs (both true for anything in
-// sessionUnified) + discovery/read succeeded (we read it) + new plan 0 pairs
-// (caller only passes 0-pair sessions) + valid marker whose decoded id matches.
-async function sessionDeletable(filePath: string, su: SessionUnified): Promise<boolean> {
+// §9.7: a session file may be deleted only when ALL conditions hold. Same
+// source selected + session belongs (both true for anything in sessionUnified)
+// + discovery/read succeeded (we read it) + nothing in this run writes that
+// file (the caller passes only 0-pair sessions and superseded names) + a valid
+// owner marker whose decoded id is the one the caller expects.
+//
+// `expectSourcePath` adds one more condition, and is passed ONLY for a leftover
+// of the old subagent naming. There, matching the id is not evidence of
+// anything: the old name IS the parent's id, so the parent's own output file
+// carries exactly the marker the child's leftover does, and a parent that has
+// dropped out of this run — narrower extraCwds, different --out, log aged out —
+// looks identical to a parent that no longer exists. The tie-breaker is the
+// preamble's "- Source:" line: a file generated FROM this subagent's own
+// rollout is this subagent's output and nothing else. When the file predates
+// that line, or names another log, the pair cannot be proven an orphan and the
+// file stays (§ requirement 5's safe direction, applied to files).
+async function sessionDeletable(
+  filePath: string,
+  source: Source,
+  sessionId: string,
+  expectSourcePath?: string,
+): Promise<boolean> {
   const marker = await parseSessionMarker(filePath);
   if (!marker) return false;                          // no valid marker / undecodable sid64
-  if (marker.source !== su.adapter.id) return false;
-  if (marker.sessionId !== su.session.sessionId) return false;
+  if (marker.source !== source) return false;
+  if (marker.sessionId !== sessionId) return false;
+  if (expectSourcePath !== undefined) {
+    if (!marker.sourcePath) return false;             // written before the line existed
+    if (!samePathString(marker.sourcePath, expectSourcePath)) return false;
+  }
   return true;
+}
+
+async function fileExists(p: string): Promise<boolean> {
+  try { await fs.stat(p); return true; } catch { return false; }
+}
+
+// Compare two recorded absolute paths. Both were produced by this program from
+// a discovered file path, so this is a spelling comparison (separators, and
+// case on win32) rather than a filesystem resolution — the log may well be gone
+// by now, which is the very situation the caller is in.
+function samePathString(a: string, b: string): boolean {
+  const norm = (s: string) => {
+    const n = path.normalize(s.trim()).replace(/[\\/]+$/, '');
+    return process.platform === 'win32' ? n.toLowerCase() : n;
+  };
+  return norm(a) === norm(b);
 }
 
 async function backupJsonl(opts: CliOptions, adapterRuns: AdapterRun[], out: OutputSink): Promise<number> {

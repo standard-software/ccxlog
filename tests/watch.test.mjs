@@ -796,13 +796,16 @@ test('F-42b (E43): a second Ctrl+C force-quits at once, code 130',
     assert.doesNotMatch(st.stdout, /ccxlog watch stopped/);
   });
 
-test('F-45 (G-51): the process exits promptly when the duration elapses (no lingering handles)', async (t) => {
+test('SMOKE/F-45 (G-51): default watch writes output and exits promptly', async (t) => {
   const s = scaffold(t);
   const w = startWatch([s.project, '--watch=2s'], s.home);
   const started = Date.now();
   const st = await w.exited;
   assert.equal(st.code, 0, st.stderr);
   assert.ok(Date.now() - started < 12000, 'the process must exit promptly after the deadline');
+  assert.equal(fs.existsSync(path.join(s.out, 'ccxlog.md')), true);
+  assert.equal(fs.existsSync(path.join(s.out, '.ccxlog.lock')), false);
+  assert.match(st.stdout, /ccxlog watch stopped \(duration elapsed\)/);
 });
 
 // ---------------------------------------------------------------------------

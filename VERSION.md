@@ -4,6 +4,13 @@
 
 ## Version
 
+### 1.7.0
+#### 2026/08/06(Thu)
+- fix Codex subagent rollouts re-rendering inherited parent conversations as
+  new messages, while preserving genuine subagent instructions and replies
+- fix Codex subagent attribution by using its own thread id and name and by
+  excluding the inherited parent token baseline from its usage totals
+
 ### 1.6.0
 #### 2026/08/03(Mon)
 - add `--watch` for continuous updates, with optional duration

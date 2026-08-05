@@ -58,6 +58,7 @@ export const codexAdapter: SourceAdapter = {
       allPairs: applyProgressRetention(buildPairs(r.entries), cfg),
       skippedLines: r.skippedLines,
       formatRecognized: r.formatRecognized,
+      thread: r.thread,
     };
   },
 

@@ -98,18 +98,43 @@ const LEGACY_SESSION_HEAD = /(^|\n)# (CCXLog|CCLog|CXLog):/;
 export interface SessionMarker {
   source: Source;
   sessionId: string;
+  /**
+   * The log this file was generated FROM, as recorded by the "- Source: <path>"
+   * line of the per-session preamble (markdownWriter.buildSessionPreamble), or
+   * '' when the line is absent — a file written by a version that predates it,
+   * or truncated beyond the head we read.
+   *
+   * The session id alone cannot say WHICH session wrote a file, because a Codex
+   * subagent used to be filed under its parent's id: `cxlog_<parent>.md` with
+   * marker `codex:<parent>` is produced both by the parent's own run and by a
+   * child writing under the old naming. The recorded log path is the only thing
+   * in the file that tells the two apart.
+   */
+  sourcePath: string;
 }
+
+// The generated line is `- Source: <absolute path to the .jsonl>`. Anchored to
+// a line start so a path appearing inside a question can never be mistaken for
+// it; the preamble is the only place it occurs within the head anyway.
+const SESSION_SOURCE_HEAD = /^- Source: (.+)$/m;
 
 // Parse the strict kind:session marker from a file head (§8.4). Returns null
 // on malformed marker or undecodable sid64 (treated as "not parseable" — the
 // file is never deleted).
+//
+// 4 KiB rather than the 512 bytes the marker itself needs: the "- Source:"
+// line sits below the owner line, the notice, the heading and the project
+// path, and every one of those grows with the length of a user's paths. A head
+// too short to reach it would silently read as "no recorded source", which is
+// the direction that refuses to delete — safe, but it would make the check
+// useless on exactly the deep paths it matters for.
 export async function parseSessionMarker(filePath: string): Promise<SessionMarker | null> {
-  const head = await readHead(filePath, 512);
+  const head = await readHead(filePath, 4096);
   const m = SESSION_OWNER_HEAD.exec(head);
   if (!m) return null;
   const sessionId = decodeSid64(m[2]);
   if (sessionId === null) return null;
-  return { source: m[1] as Source, sessionId };
+  return { source: m[1] as Source, sessionId, sourcePath: SESSION_SOURCE_HEAD.exec(head)?.[1].trim() ?? '' };
 }
 
 // Which exported .md files in outDir --backup-md should copy (§9.4).

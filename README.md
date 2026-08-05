@@ -481,6 +481,15 @@ nothing has changed, the file's modification time is preserved as well.
   session ids are per-file positional, so Codex pairs are never merged this way.
   `--per-session` output is intentionally left un-deduplicated so each session
   file stays a complete transcript.
+- **Codex subagents.** Every time Codex CLI starts a subagent it writes a new
+  rollout and copies the parent session's whole conversation into it, with each
+  copied line's timestamp rewritten to the child's start time — so old questions
+  used to reappear as new ones. A copied pair is dropped only when the identical
+  pair is confirmed present in an older rollout of the same lineage; a pair the
+  ancestor never had (a compacted child holds history the parent lost) is kept,
+  and an answer only the copy had is merged into the surviving original. The
+  instructions a subagent receives are rendered as questions of their own, and a
+  subagent is listed under its own thread id and agent nickname.
 - **Cancelled questions are kept.** If a Claude Code turn is interrupted
   before any assistant output and the message is retyped, the cancelled
   question is still emitted as its own pair with an empty Answer — including

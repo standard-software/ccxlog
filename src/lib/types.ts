@@ -29,6 +29,20 @@ export interface UserEntry {
   sessionId?: string;
   cwd?: string;
   turnId?: string;         // Codex only
+  // Codex only — material for the inherited-history replay key (lib/replayKey.ts).
+  // A Codex subagent rollout re-records the whole parent conversation, so the
+  // SAME user message appears in several files with a rewritten outer
+  // timestamp. These two fields are what lets the copies be recognised as one
+  // message without trusting the timestamp.
+  replayMsgId?: string;    // the response_item message-item id (`msg_…`), stable across files
+  replayTurnKey?: string;  // `<turn_id>#<index of this user message within the turn>`
+  // Codex only: an instruction DELIVERED TO this subagent (the response_item
+  // agent_message that directly follows inter_agent_communication_metadata).
+  // It opens a Q&A boundary exactly like a human question does — this single
+  // flag is both the detection result and the pairBuilder split condition
+  // (sources/codex/pairBuilder.ts), so the two can never drift apart.
+  isReceivedInstruction?: boolean;
+  progressKey?: string;    // Codex only — see AssistantEntry.progressKey
 }
 
 export interface AssistantEntry {
@@ -41,12 +55,36 @@ export interface AssistantEntry {
   isProgressOnly?: boolean; // Codex only
   sessionId?: string;
   turnId?: string;         // Codex only
+  // Codex only: what this progress record IS, in a form that identifies it
+  // across two files that recorded the same activity — the tool name and the
+  // model's own call id, or the reasoning item id.
+  //
+  // It is a TOP-LEVEL string on purpose. Comparing two copies' progress may not
+  // read `message.content`, because progressData.applyProgressRetention()
+  // empties the tool blocks there as soon as the template does not reference
+  // Progress; a comparison based on them would let the template decide which
+  // blocks a run keeps. Top-level primitives survive that pass (they are not in
+  // its DEAD_TOP_LEVEL_KEYS denylist), so this one field says the same thing in
+  // both directions. It costs a string concatenation per tool record at parse
+  // time and nothing afterwards.
+  progressKey?: string;
 }
 
 export type LogEntry =
   | UserEntry
   | AssistantEntry
   | ({ type: string } & Record<string, unknown>);
+
+// Codex thread identity. One rollout carries THREE distinct ids, and folding
+// them into a single `sessionId` is what made a subagent adopt its parent's
+// identity, so they are kept apart here.
+export interface ThreadIdentity {
+  threadId: string;          // payload.id — this thread itself (display / file names)
+  lineageSessionId: string;  // payload.session_id — the lineage (parent) id, used for matching
+  parentThreadId: string;    // payload.parent_thread_id — the thread that spawned this one
+  isSubagent: boolean;       // thread_source === 'subagent', or source.subagent present
+  agentName: string;         // agent_nickname, else agent_path
+}
 
 export interface Pair {
   questionEntry: UserEntry;
@@ -106,6 +144,31 @@ export interface UnifiedPair {
   // positional (u-0, a-1, …) and would collide across sessions — so it is empty
   // for every Codex pair, which excludes them from that pass.
   forkKeys: string[];
+  // Internal (never rendered): the identity of this pair's user message(s),
+  // independent of the file they were read from. Used ONLY to recognise the
+  // parent-history replay inside a Codex subagent rollout
+  // (sources/codex/inheritedHistory.ts). `replayKey` is '' for Claude and for
+  // any Codex pair whose messages lack the material to build one — an empty key
+  // means "cannot be proven a replay", so the pair is kept. `replayTextHash`
+  // covers the text of every user message of the pair, in order, and is the
+  // final confirmation before anything is dropped.
+  replayKey: string;
+  replayTextHash: string;
+  // Internal: a hash of every text this copy of the turn could show as its
+  // answer (lib/replayKey.ts). A copy taken while the turn was still running
+  // ends on one of the other copy's intermediate messages, and that has to be
+  // told apart from two copies genuinely disagreeing.
+  answerTextHashes: string[];
+  // Internal: how many progress records back this pair, and what each of them
+  // is (lib/replayKey.progressSignatureOf). Deciding which copy of a turn holds
+  // the richer progress must NOT mean rendering Progress on both sides: that is
+  // the heavy work v1.6.0 made lazy, and — worse — the rendered text is empty
+  // whenever the template does not reference Progress, which would let the
+  // template decide which blocks survive. The signature is lazy and memoised
+  // like the accessors above, and is built only from what survives
+  // progressData.applyProgressRetention().
+  progressEntryCount: number;
+  progressSignature: () => string[];
 }
 
 export interface CliOptions {

@@ -1,7 +1,7 @@
 {
   "private": false,
   "name": "@standard-software/ccxlog",
-  "version": "1.6.0",
+  "version": "1.7.0",
   "description": "Discover and merge Claude Code and Codex CLI session logs (JSONL) into a single readable Markdown timeline.",
   "type": "module",
   "bin": {
@@ -21,7 +21,14 @@
     "typecheck": "tsc --noEmit",
     "prepublishOnly": "tsc",
     "pretest": "tsc",
-    "test": "node --test \"tests/*.test.mjs\""
+    "test": "node tools/run-tests.mjs normal",
+    "test:normal": "npm test",
+    "pretest:watch:smoke": "tsc",
+    "test:watch:smoke": "node tools/run-tests.mjs watch-smoke",
+    "pretest:watch": "tsc",
+    "test:watch": "node tools/run-tests.mjs watch",
+    "pretest:all": "tsc",
+    "test:all": "node tools/run-tests.mjs all"
   },
   "publishConfig": {
     "access": "public"

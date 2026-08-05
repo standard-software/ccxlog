@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {
   ROOT, mkTmp, rmrf, runCli, writeJsonl, writeCodexSession,
-  writeCodexSessionIndex, codexQA,
+  writeCodexSessionIndex, codexQA, writeConfig,
 } from './helpers.mjs';
 
 function pathToUrl(p) {
@@ -89,4 +89,64 @@ test('an embedded session_meta title remains a fallback when no index exists', (
   assert.equal(result.code, 0, result.stderr);
   const output = fs.readFileSync(path.join(project, 'CCXLOG', 'cxlog.md'), 'utf-8');
   assert.match(output, /Session:Embedded title:embedded-name/);
+});
+
+test('out-of-order session-index rows resolve by updated_at, not file order', async (t) => {
+  const dir = mkTmp('ccx-session-index-order-');
+  t.after(() => rmrf(dir));
+  const file = path.join(dir, 'session_index.jsonl');
+  writeJsonl(file, [
+    { id: 'a', thread_name: 'Newest', updated_at: '2026-08-05T05:30:18Z' },
+    { id: 'a', thread_name: 'Older', updated_at: '2026-08-04T00:34:45Z' },
+  ]);
+
+  const names = await readSessionIndex(file);
+  assert.equal(names.get('a'), 'Newest');
+});
+
+test('the live Codex database outranks a stale session_index row', async (t) => {
+  let DatabaseSync;
+  try { ({ DatabaseSync } = await import('node:sqlite')); } catch { t.skip('node:sqlite unavailable'); return; }
+  const home = mkTmp('ccx-session-db-');
+  t.after(() => rmrf(home));
+  const project = path.join(home, 'project');
+  fs.mkdirSync(project, { recursive: true });
+  const sessionId = '019f-session-db-0001';
+  writeCodexSession(home, 'rollout.jsonl', codexQA(project, { sessionId }));
+  // Codex appends renames here, so the file can still name a session by a
+  // title it no longer carries (the defect this test pins down).
+  writeCodexSessionIndex(home, [
+    { id: sessionId, thread_name: 'Stale', updated_at: '2026-08-04T00:34:45Z' },
+  ]);
+  const db = new DatabaseSync(path.join(home, '.codex', 'state_5.sqlite'));
+  db.exec('CREATE TABLE threads (id TEXT PRIMARY KEY, name TEXT, title TEXT)');
+  db.prepare('INSERT INTO threads (id, name, title) VALUES (?, ?, ?)').run(sessionId, null, 'Renamed');
+  db.close();
+
+  const result = runCli([project, '-cx'], { home });
+  assert.equal(result.code, 0, result.stderr);
+  const output = fs.readFileSync(path.join(project, 'CCXLOG', 'cxlog.md'), 'utf-8');
+  assert.ok(output.includes(`[Codex] Session:Renamed:${sessionId}`), output);
+  assert.doesNotMatch(output, /Session:Stale:/);
+});
+
+test('a nested extra root without its own index falls back to the broader root', (t) => {
+  const home = mkTmp('ccx-session-fallthrough-');
+  t.after(() => rmrf(home));
+  const project = path.join(home, 'project');
+  const out = path.join(project, 'CCXLOG');
+  fs.mkdirSync(out, { recursive: true });
+  const sessionId = '019f-session-fallthrough-1';
+  writeCodexSession(home, 'rollout.jsonl', codexQA(project, { sessionId }));
+  // Only the standard root's index names this session...
+  writeCodexSessionIndex(home, [
+    { id: sessionId, thread_name: 'Named', updated_at: '2026-08-05T05:30:18Z' },
+  ]);
+  // ...while a more specific extra root nested inside it carries no index.
+  writeConfig(out, { codex: { extraLogDirs: [path.join(home, '.codex', 'sessions', '2026')] } });
+
+  const result = runCli([project, '-cx'], { home });
+  assert.equal(result.code, 0, result.stderr);
+  const output = fs.readFileSync(path.join(out, 'cxlog.md'), 'utf-8');
+  assert.ok(output.includes(`[Codex] Session:Named:${sessionId}`), output);
 });

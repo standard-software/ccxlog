@@ -1,6 +1,6 @@
 import type { CcxlogConfig } from '../lib/config.js';
 import type { FileSnapshot, PathDep } from '../lib/pathUtils.js';
-import type { Pair, Source, SourceLabel } from '../lib/types.js';
+import type { Pair, Source, SourceLabel, ThreadIdentity } from '../lib/types.js';
 
 // A discovery root and its stable namespace key (§5.5). `origin` is
 // 'standard' (the source's default log tree) or 'extra' (an extraLogDirs
@@ -40,6 +40,11 @@ export interface SessionData {
   allPairs: Pair[];
   skippedLines: number;
   formatRecognized: boolean;         // was a record of this source's own format seen? (§format detection, v1.5.0)
+  // Codex only: the three thread ids kept apart (see ThreadIdentity).
+  // Undefined for Claude and for a Codex rollout with no session_meta.
+  // `sessionId` above stays the id used for display and file names; this is the
+  // extra material the parent/child matching needs.
+  thread?: ThreadIdentity;
 }
 
 export interface FilterContext {
