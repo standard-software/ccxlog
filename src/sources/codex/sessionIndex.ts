@@ -103,11 +103,11 @@ async function findStateDb(codexHome: string): Promise<string | null> {
 }
 
 /**
- * id -> thread name from Codex's `threads` table. This is the name Codex itself
- * shows: a rename lands here immediately, while `session_index.jsonl` is an
- * append-only log that can still hold a stale record for the same session.
- * Any failure (Node without `node:sqlite`, a locked or older database) simply
- * yields no names so the index file stays in charge.
+ * id -> thread title from Codex's `threads` table. `title` also carries the
+ * automatically generated first-message title and can lag behind a rename in
+ * `session_index.jsonl`, so it is a fallback rather than the primary name
+ * source. Any failure (Node without `node:sqlite`, a locked or older database)
+ * simply yields no titles.
  */
 export async function readStateDbNames(codexHome: string): Promise<Map<string, string>> {
   const names = new Map<string, string>();
@@ -191,7 +191,10 @@ export async function applyCodexSessionNames(
     for (const indexed of indexedRoots) {
       if (!isPathWithin(filePath, indexed.rootDir)) continue;
       const record = indexed.indexNames.get(session.sessionId);
-      const name = indexed.dbNames.get(session.sessionId) ?? (record?.name || '');
+      // `thread_name` is the dedicated rename record and is observed to update
+      // before the live database. The database's `title` can remain the first
+      // user message until a later flush, so use it only as a fallback.
+      const name = record?.name || indexed.dbNames.get(session.sessionId) || '';
       // Nothing named this session here: keep looking in the broader roots
       // instead of giving up on the first one that merely contains the file.
       if (!name) continue;

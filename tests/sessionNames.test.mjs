@@ -104,7 +104,7 @@ test('out-of-order session-index rows resolve by updated_at, not file order', as
   assert.equal(names.get('a'), 'Newest');
 });
 
-test('the live Codex database outranks a stale session_index row', async (t) => {
+test('a session-index rename outranks a stale live-database title', async (t) => {
   let DatabaseSync;
   try { ({ DatabaseSync } = await import('node:sqlite')); } catch { t.skip('node:sqlite unavailable'); return; }
   const home = mkTmp('ccx-session-db-');
@@ -113,21 +113,41 @@ test('the live Codex database outranks a stale session_index row', async (t) => 
   fs.mkdirSync(project, { recursive: true });
   const sessionId = '019f-session-db-0001';
   writeCodexSession(home, 'rollout.jsonl', codexQA(project, { sessionId }));
-  // Codex appends renames here, so the file can still name a session by a
-  // title it no longer carries (the defect this test pins down).
+  // Codex records the explicit rename here before the live database catches
+  // up. Its title can still be the automatically generated first message.
   writeCodexSessionIndex(home, [
-    { id: sessionId, thread_name: 'Stale', updated_at: '2026-08-04T00:34:45Z' },
+    { id: sessionId, thread_name: 'Renamed', updated_at: '2026-08-06T03:41:11Z' },
   ]);
   const db = new DatabaseSync(path.join(home, '.codex', 'state_5.sqlite'));
   db.exec('CREATE TABLE threads (id TEXT PRIMARY KEY, name TEXT, title TEXT)');
-  db.prepare('INSERT INTO threads (id, name, title) VALUES (?, ?, ?)').run(sessionId, null, 'Renamed');
+  db.prepare('INSERT INTO threads (id, name, title) VALUES (?, ?, ?)').run(sessionId, null, '/r');
   db.close();
 
   const result = runCli([project, '-cx'], { home });
   assert.equal(result.code, 0, result.stderr);
   const output = fs.readFileSync(path.join(project, 'CCXLOG', 'cxlog.md'), 'utf-8');
   assert.ok(output.includes(`[Codex] Session:Renamed:${sessionId}`), output);
-  assert.doesNotMatch(output, /Session:Stale:/);
+  assert.doesNotMatch(output, /Session:\/r:/);
+});
+
+test('the live-database title remains a fallback when the index has no name', async (t) => {
+  let DatabaseSync;
+  try { ({ DatabaseSync } = await import('node:sqlite')); } catch { t.skip('node:sqlite unavailable'); return; }
+  const home = mkTmp('ccx-session-db-fallback-');
+  t.after(() => rmrf(home));
+  const project = path.join(home, 'project');
+  fs.mkdirSync(project, { recursive: true });
+  const sessionId = '019f-session-db-fallback';
+  writeCodexSession(home, 'rollout.jsonl', codexQA(project, { sessionId }));
+  const db = new DatabaseSync(path.join(home, '.codex', 'state_5.sqlite'));
+  db.exec('CREATE TABLE threads (id TEXT PRIMARY KEY, name TEXT, title TEXT)');
+  db.prepare('INSERT INTO threads (id, name, title) VALUES (?, ?, ?)').run(sessionId, null, 'Database title');
+  db.close();
+
+  const result = runCli([project, '-cx'], { home });
+  assert.equal(result.code, 0, result.stderr);
+  const output = fs.readFileSync(path.join(project, 'CCXLOG', 'cxlog.md'), 'utf-8');
+  assert.ok(output.includes(`[Codex] Session:Database title:${sessionId}`), output);
 });
 
 test('a nested extra root without its own index falls back to the broader root', (t) => {

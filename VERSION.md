@@ -4,6 +4,13 @@
 
 ## Version
 
+### 1.7.1
+#### 2026/08/07(Fri)
+- show the name a Codex thread was renamed to instead of the first message it
+  happened to start with. Codex records a rename in `session_index.jsonl`
+  before its live database catches up, and that database also holds the
+  auto-generated title, so the rename record now takes precedence
+
 ### 1.7.0
 #### 2026/08/06(Thu)
 - fix Codex subagent rollouts re-rendering inherited parent conversations as
