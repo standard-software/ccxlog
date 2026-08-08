@@ -145,8 +145,49 @@ export interface BuildPairsOptions {
   includeSidechain?: boolean;
 }
 
+// Is this raw log entry part of a subagent (sidechain) conversation?
+// Read straight off the entry, so a queued_command attachment — which carries
+// the flag at the same top level — is classified like any other record.
+function isSidechainEntry(e: LogEntry): boolean {
+  return (e as { isSidechain?: unknown }).isSidechain === true;
+}
+
+/**
+ * Split a session log into its main conversation and its subagent (sidechain)
+ * conversation, each built as an INDEPENDENT stream.
+ *
+ * Building one interleaved stream — what `includeSidechain: true` used to do —
+ * lets a sidechain record change the main conversation's pair boundaries: a
+ * sidechain question opens a pair, and the parent's own next record (typically
+ * the Task tool_result that closes the delegation) is then filed under it. That
+ * makes "turn subagents on" a change to blocks that have nothing to do with
+ * subagents, which spec §5.2 / §13 forbid — the new default must ADD subagent
+ * blocks and leave every existing block and ccxlogid untouched.
+ *
+ * Partitioning first makes that invariant structural rather than incidental:
+ * the main stream is exactly the record sequence the old default (subagents
+ * hidden) processed, so it produces exactly the same pairs, and the subagent
+ * pairs are additional.
+ */
+export function buildPairsSplit(entries: LogEntry[]): { main: Pair[]; subagent: Pair[] } {
+  const mainEntries: LogEntry[] = [];
+  const sidechainEntries: LogEntry[] = [];
+  for (const e of entries) {
+    if (!e || typeof e !== 'object') continue;
+    (isSidechainEntry(e) ? sidechainEntries : mainEntries).push(e);
+  }
+  const subagent = sidechainEntries.length ? buildStream(sidechainEntries) : [];
+  for (const p of subagent) p.isSubagent = true;
+  return { main: buildStream(mainEntries), subagent };
+}
+
 export function buildPairs(entries: LogEntry[], options: BuildPairsOptions = {}): Pair[] {
   const { includeSidechain = false } = options;
+  const { main, subagent } = buildPairsSplit(entries);
+  return includeSidechain ? [...main, ...subagent] : main;
+}
+
+function buildStream(entries: LogEntry[]): Pair[] {
   const pairs: Pair[] = [];
   let current: Pair | null = null;
 
@@ -155,7 +196,6 @@ export function buildPairs(entries: LogEntry[], options: BuildPairsOptions = {})
 
     const queued = asQueuedPromptUser(e);
     if (queued) {
-      if (queued.isSidechain && !includeSidechain) continue;
       if (current && current.finalAssistantEntry) {
         pairs.push(current);
         current = null;
@@ -174,7 +214,6 @@ export function buildPairs(entries: LogEntry[], options: BuildPairsOptions = {})
     }
 
     if (isUserEntry(e)) {
-      if (e.isSidechain && !includeSidechain) continue;
       const content = e.message?.content;
       if (content === undefined || content === null) continue;
 
@@ -227,7 +266,6 @@ export function buildPairs(entries: LogEntry[], options: BuildPairsOptions = {})
     }
 
     if (isAssistantEntry(e)) {
-      if (e.isSidechain && !includeSidechain) continue;
       if (!current) continue;
       if (current.finalAssistantEntry) {
         current.progressEntries.push(current.finalAssistantEntry);

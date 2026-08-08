@@ -46,13 +46,18 @@ export interface InheritedHistoryResult {
    * answer, or progress records, the ancestor could not absorb. Reported so
    * that "a block vanished and nothing gained its content" is impossible to
    * reach unnoticed.
+   *
+   * Each is handed back WITH the pair it describes, and no bare count is
+   * offered, on purpose. "Kept" is a promise to the user that the content is
+   * still in the output — but the subagent display filter runs after this pass
+   * and can hide a conflict a moment later (spec §13). Only the caller knows
+   * which pairs survived, so only the caller can count them; a ready-made total
+   * here would be the wrong number waiting to be printed.
+   *
+   * `note` says which of the two reasons it was, the session, and the start of
+   * the question — enough to find the block, for --verbose.
    */
-  conflicts: number;
-  /**
-   * One line per kept conflict, for --verbose: which of the two reasons it
-   * was, the session, and the start of the question. Enough to find the block.
-   */
-  conflictNotes: string[];
+  conflictEntries: Array<{ pair: UnifiedPair; note: string }>;
 }
 
 // A one-line, single-line-safe excerpt of a question, for diagnostics.
@@ -249,7 +254,7 @@ export function removeInheritedHistory(sessions: ReplaySession[]): InheritedHist
   }
 
   const subagents = sessions.filter(s => threadOf(s)?.isSubagent);
-  if (subagents.length === 0) return { removed: 0, merged: 0, conflicts: 0, conflictNotes: [] };
+  if (subagents.length === 0) return { removed: 0, merged: 0, conflictEntries: [] };
 
   // Shallow threads first, so a grandchild is matched against a parent whose
   // own inherited pairs have already been folded into the lineage root. Depth
@@ -361,8 +366,7 @@ export function removeInheritedHistory(sessions: ReplaySession[]): InheritedHist
   return {
     removed,
     merged,
-    conflicts: conflictNotesByPair.size,
-    conflictNotes: [...conflictNotesByPair.values()],
+    conflictEntries: [...conflictNotesByPair].map(([pair, note]) => ({ pair, note })),
   };
 }
 

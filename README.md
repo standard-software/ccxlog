@@ -275,7 +275,7 @@ CCXLOG/
       ├─ cc/   ← Claude Code JSONL, mirroring the live layout:
       │        <session id>.jsonl and <session id>/subagents/agent-*.jsonl
       │        (subagent transcripts are always backed up, regardless of
-      │        the includeSidechain setting)
+      │        the includeSubagents setting)
       └─ cx/   ← Codex JSONL, preserving the <yyyy>/<mm>/<dd>/ date tree
 ```
 
@@ -319,13 +319,14 @@ or `codex` namespace:
     "outputAllFileName": "cclog.md",
     "outputSessionFilePrefix": "cclog_",
     "extraLogDirs": [],
-    "includeSidechain": false
+    "includeSubagents": true
   },
   "codex": {
     "outputAllFileName": "cxlog.md",
     "outputSessionFilePrefix": "cxlog_",
     "extraLogDirs": [],
-    "includeDeveloperMessages": false
+    "includeDeveloperMessages": false,
+    "includeSubagents": true
   }
 }
 ```
@@ -350,12 +351,59 @@ on Ubuntu/macOS (`/home/you/...`).
 | `outputAllFileName`       | Aggregate filename for `-cc` / `-cx` mode. Defaults `cclog.md` / `cxlog.md`. |
 | `outputSessionFilePrefix` | Prefix for per-session filenames (used with `--per-session`). Defaults `cclog_` / `cxlog_`, so files are `cclog_<id>.md` / `cxlog_<id>.md`. Empty string means no prefix. |
 | `extraLogDirs`            | Additional raw log directories to read verbatim (backup snapshots, log trees copied from another machine, ...). Entries are read without the cwd filter, and may point anywhere — including under `<out>` (e.g. `backup_jsonl/<stamp>/cc`). Each source ingests only files in its own format (claude skips Codex rollouts and vice versa; unrelated `.jsonl` is skipped by both, reported under `--verbose`). |
-| `includeSidechain`        | *(claude only)* If `true`, include subagent / sidechain records: sidechain-marked pairs inside the session logs, plus the separate `<session id>/subagents/*.jsonl` transcript files newer Claude Code versions write, which are rendered as additional sessions. |
+| `includeSubagents`        | If `true` (**default**), render the conversations of subagents — the child AIs or threads a session delegates work to. Set `false` to keep only the main conversation. Each key controls its own source. See [Subagents](#subagents) below. |
+| `includeSidechain`        | *(claude only)* The supported former name of `claude.includeSubagents`; `sidechain` is Claude Code's historical term for the same records. It still works on its own. Setting **both** to *different* values is a fatal config error — ccxlog will not silently pick one. |
 | `includeDeveloperMessages`| *(codex only)* If `true`, include Codex developer/system messages in the output. |
 
 Log-directory recursion is selected automatically for each source and is not
 configurable: Claude Code roots are scanned at the top level, while Codex roots
 are scanned recursively because Codex stores sessions in date subdirectories.
+
+### Subagents
+
+Both tools can delegate work to a subagent, and both record what the subagent
+did. `claude.includeSubagents` and `codex.includeSubagents` decide whether those
+conversations are **rendered**; they default to `true`, so the output is a
+complete record of the session.
+
+What counts as a subagent:
+
+- **Claude Code** — pairs marked `isSidechain` inside a session log, plus the
+  separate `<session id>/subagents/*.jsonl` transcripts newer versions write,
+  which are rendered as additional sessions. (`sidechain` is the historical name
+  for the same thing; it survives only in the compatibility key above.)
+- **Codex** — a rollout whose `session_meta` says `thread_source: "subagent"` or
+  carries `source.subagent`. An ordinary fork or resume is **not** a subagent and
+  is never affected by this setting, even though it also carries
+  `forked_from_id`.
+
+Three things the setting does *not* do:
+
+- **It does not stop the raw logs from being preserved.** `--backup-jsonl`
+  always copies subagent logs from both sources. Whether to *display* a
+  conversation and whether to *keep* its log are separate questions.
+- **It does not remove mentions of subagents from the main conversation.** Only
+  the child's own conversation is affected.
+- **It does not make a run cheaper.** Every log is still discovered and fully
+  parsed with `false`. Codex subagent rollouts re-record their parent's
+  conversation, and answers, progress and token counts that only the child
+  recorded are merged back into the parent *before* anything is hidden — which
+  can only be done by reading all of it. So `false` reduces what you read, not
+  what ccxlog reads: file count, parse volume, peak memory and `--watch` memory
+  are the same as with `true`.
+
+Switching the setting is safe in both directions. Turning subagents **on** only
+adds blocks, so existing `ccxlogid`s and their content stay exactly as they were
+and no automatic backup is needed. Turning them **off** removes blocks, so the
+previous Markdown is backed up to `backup_CCXLOG_md_auto/` before the first
+destructive rewrite, and per-session files that belong to a subagent session are
+backed up and then removed rather than left behind as stale output. Re-running
+with the same setting and the same logs is a complete no-op.
+
+If a project's only logs are subagent transcripts, `false` legitimately leaves
+nothing to show: ccxlog writes a 0-pair file and exits 0. That is different from
+finding no logs at all, which is still an error that leaves existing output
+untouched.
 
 ### Templates
 
@@ -489,7 +537,9 @@ nothing has changed, the file's modification time is preserved as well.
   ancestor never had (a compacted child holds history the parent lost) is kept,
   and an answer only the copy had is merged into the surviving original. The
   instructions a subagent receives are rendered as questions of their own, and a
-  subagent is listed under its own thread id and agent nickname.
+  subagent is listed under its own thread id and agent nickname. Set
+  `codex.includeSubagents: false` to hide the child conversations entirely; the
+  matching above still runs first, so nothing the child alone recorded is lost.
 - **Cancelled questions are kept.** If a Claude Code turn is interrupted
   before any assistant output and the message is retyped, the cancelled
   question is still emitted as its own pair with an empty Answer — including

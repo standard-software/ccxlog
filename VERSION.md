@@ -4,6 +4,22 @@
 
 ## Version
 
+### 1.8.0
+#### 2026/08/09(Sun)
+- add `codex.includeSubagents` and `claude.includeSubagents` — one setting name
+  in both sources for whether subagent conversations are rendered. Both default
+  to `true`, so Codex output is unchanged and Claude output only gains the
+  subagent blocks it used to omit, without moving any existing `ccxlogid`
+- `claude.includeSidechain` keeps working as the former name; setting both to
+  different values is a config error rather than a silent choice between them
+- subagent logs are always backed up by `--backup-jsonl` whatever the setting
+  says, and `false` hides Codex subagents only after the inherited-history
+  merge, so it reduces what is displayed rather than what is read
+- a Codex subagent's reply to the session that spawned it is now progress of
+  the block that delegated the work, as a Claude Task result already was. It
+  used to open a block of its own, splitting the delegation in two and keeping
+  the subagent's words on show even with `codex.includeSubagents: false`
+
 ### 1.7.1
 #### 2026/08/07(Fri)
 - show the name a Codex thread was renamed to instead of the first message it

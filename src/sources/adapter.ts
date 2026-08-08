@@ -11,15 +11,23 @@ export interface RootRef {
   origin: 'standard' | 'extra';
   stableRootKey: string;
   recursive: boolean;
-  // Claude only (when includeSidechain is on): also scan
-  // subagents/*.jsonl under each session directory immediately below the root
-  // — the separate-file layout Claude Code uses for subagent transcripts.
+  // Claude only: also scan subagents/*.jsonl under each session directory
+  // immediately below the root — the separate-file layout Claude Code uses for
+  // subagent transcripts. It does NOT depend on `includeSubagents`: discovery
+  // must find these logs whatever the display setting says, so that
+  // --backup-jsonl still preserves them and per-session output can still
+  // identify (and clean up) the files they own (spec §8 step 2, §9.1, §11).
   scanSubagentDirs?: boolean;
 }
 
 export interface DiscoveredFile {
   filePath: string;
   root: RootRef;
+  // Claude only: this file was found directly under a `<session id>/subagents/`
+  // directory, so the WHOLE file is a subagent transcript. The entries inside it
+  // do not reliably carry `isSidechain` (spec §4.2), so the directory is the
+  // authority for the separate-file layout.
+  subagentDir?: boolean;
   // size/mtimeMs/dev/ino as of discovery, i.e. before reading. Used for the
   // identity check of the incremental re-parse cache (lib/analysisCache.ts). A
   // file we failed to stat gets undefined, and is then never served from the

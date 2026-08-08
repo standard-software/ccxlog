@@ -261,7 +261,7 @@ ccxlog --backup-jsonl
      └─ <yyyy-mm-dd_hh-mm-ss>_<hostname>/
         ├─ cc/   ← Claude Code の JSONL（ライブ配置のミラー:
         │        <セッションID>.jsonl と <セッションID>/subagents/agent-*.jsonl。
-        │        subagents は includeSidechain の設定に関わらず必ずバックアップ）
+        │        subagents は includeSubagents の設定に関わらず必ずバックアップ）
         └─ cx/   ← Codex の JSONL（<年>/<月>/<日>/ の日付ツリーを保存）
 ```
 
@@ -307,13 +307,14 @@ Markdown の（再）生成は**行いません**。
     "outputAllFileName": "cclog.md",
     "outputSessionFilePrefix": "cclog_",
     "extraLogDirs": [],
-    "includeSidechain": false
+    "includeSubagents": true
   },
   "codex": {
     "outputAllFileName": "cxlog.md",
     "outputSessionFilePrefix": "cxlog_",
     "extraLogDirs": [],
-    "includeDeveloperMessages": false
+    "includeDeveloperMessages": false,
+    "includeSubagents": true
   }
 }
 ```
@@ -339,12 +340,55 @@ Ubuntu/macOS ではスラッシュ区切りのパス（`/home/you/...`）を使�
 | `outputAllFileName`       | `-cc` / `-cx` モードの集約ファイル名。既定 `cclog.md` / `cxlog.md`。 |
 | `outputSessionFilePrefix` | セッションごとのファイル名の接頭辞（`--per-session` で使用）。既定 `cclog_` / `cxlog_` で、`cclog_<id>.md` / `cxlog_<id>.md` になる。空文字なら接頭辞なし。 |
 | `extraLogDirs`            | そのまま読み取る追加の生ログディレクトリ（バックアップのスナップショット、別マシンから持ってきたログツリーなど）。cwd フィルタなしで読み、`<out>` 配下（例: `backup_jsonl/<日時>/cc`）を含めどこでも指定できる。各ソースは自分の形式のファイルだけを取り込む（claude は Codex rollout を、codex は Claude セッションログを読み飛ばし、無関係な `.jsonl` は両方が読み飛ばす。`--verbose` で表示）。 |
-| `includeSidechain`        | *(claude のみ)* `true` ならサブエージェント／サイドチェーンの記録を出力に含める。セッションログ内の sidechain ペアに加えて、新しめの Claude Code が書く `<セッションID>/subagents/*.jsonl` 形式の別ファイルも探索し、追加セッションとして描画する。 |
+| `includeSubagents`        | `true`（**既定**）なら、サブエージェント（セッションが作業を委任した子 AI・子スレッド）の会話も描画する。`false` にすると本体の会話だけを残す。キーはそれぞれ自分のソースだけを制御する。下の [サブエージェント](#サブエージェント) を参照。 |
+| `includeSidechain`        | *(claude のみ)* `claude.includeSubagents` のサポート対象の旧名。`sidechain` は同じ記録に対する Claude Code の歴史的な用語で、この設定だけを書いていた場合は今までどおり動作する。**両方**に**異なる**値を書いた場合は致命的な設定エラーになる（どちらかを黙って優先することはしない）。 |
 | `includeDeveloperMessages`| *(codex のみ)* `true` なら Codex の developer/system メッセージも出力に含める。 |
 
 ログディレクトリを再帰探索するかどうかは、ソースごとに自動選択され、設定する必要は
 ありません。Claude Code はログディレクトリ直下のみ、Codex はセッションが日付別の
 サブディレクトリに保存されるため再帰的に探索します。
+
+### サブエージェント
+
+Claude Code も Codex も、作業をサブエージェントに委任でき、その作業内容をログに
+記録します。`claude.includeSubagents` と `codex.includeSubagents` は、その会話を
+**描画するかどうか**を決めます。既定は `true` で、出力はセッションの完全な記録に
+なります。
+
+何をサブエージェントとみなすか:
+
+- **Claude Code** — セッションログ内の `isSidechain` が付いたペアに加えて、新しめの
+  バージョンが書く `<セッションID>/subagents/*.jsonl` 形式の別ファイル（追加の
+  セッションとして描画されます）。（`sidechain` は同じものの歴史的な呼び名で、
+  上の互換キーにだけ残っています。）
+- **Codex** — `session_meta` が `thread_source: "subagent"` を持つか
+  `source.subagent` を持つ rollout。通常の fork や resume はサブエージェントでは
+  **ありません**。`forked_from_id` を持っていてもこの設定の影響を受けません。
+
+この設定が**しない**こと:
+
+- **生ログの保全は止めません。** `--backup-jsonl` は両ソースのサブエージェント
+  ログを常にコピーします。会話を*表示する*かと、ログを*残す*かは別の問題です。
+- **本体の会話からサブエージェントへの言及を消しません。** 制御するのは子自身の
+  会話だけです。
+- **処理は軽くなりません。** `false` でも全ログを探索し、完全にパースします。
+  Codex のサブエージェント rollout は親の会話を再収録するため、子側だけが記録した
+  回答・進捗・トークンを非表示にする*前に*親へ統合する必要があり、それには全部を
+  読むしかありません。つまり `false` が減らすのは**あなたが読む量**であって
+  ccxlog が読む量ではありません。ファイル数・パース量・ピークメモリ・`--watch` の
+  メモリ使用量は `true` と同じです。
+
+設定の切り替えはどちらの方向でも安全です。サブエージェントを**表示する**方向は
+ブロックが増えるだけなので、既存の `ccxlogid` と内容はそのまま残り、自動バックアップも
+不要です。**非表示にする**方向はブロックが減るため、最初の破壊的な書き換えの前に
+`backup_CCXLOG_md_auto/` へ既存の Markdown をバックアップし、サブエージェントの
+per-session ファイルもバックアップしたうえで削除します（古い表示として残しません）。
+同じ設定・同じログでの2回目の実行は完全な no-op です。
+
+プロジェクトのログがサブエージェントの記録しかない場合、`false` では表示するものが
+本当に無くなります。このとき ccxlog は0ペアのファイルを書いて終了コード0を返します。
+これは「ログが1つも見つからない」場合とは別で、後者は従来どおりエラーになり、既存の
+出力はそのまま維持されます。
 
 ### テンプレート
 
@@ -471,7 +515,9 @@ ccxlog は、生成結果が変わる場合にだけ出力ファイルを更新�
   同一のペアが存在すると確認できた場合だけです。親に無い履歴（compaction 後の子が
   持つ履歴）は残し、コピー側にしかない回答は残る側のペアへ統合します。
   サブエージェントが受け取った指示は独立した質問として描画し、サブエージェント自身は
-  自分のスレッド ID とエージェント名で一覧されます。
+  自分のスレッド ID とエージェント名で一覧されます。子の会話をまるごと隠したい場合は
+  `codex.includeSubagents: false` を設定します。上の照合は非表示にする前に行うので、
+  子側だけが記録した情報が失われることはありません。
 - **キャンセルした質問も残ります。** Claude Code のターンを回答が始まる前に中断して
   打ち直した場合でも、キャンセルされた質問は回答が空の独立したペアとして出力されます
   （連続キャンセルもすべて残ります）。回答がまだ無いターンへの追いメッセージが同じ

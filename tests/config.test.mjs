@@ -107,7 +107,8 @@ test('config: boolean type mismatches warn and fall back to defaults', async () 
   await withConfig({ claude: { includeSidechain: 'yes' }, codex: { includeDeveloperMessages: 1 } }, async (dir) => {
     const { config, warnings, errors } = await loadConfig(dir, dir);
     assert.equal(errors.length, 0, errors.join('; '));
-    assert.equal(config.claude.includeSidechain, false);
+    // The former name resolves into includeSubagents, whose default is true.
+    assert.equal(config.claude.includeSubagents, true);
     assert.equal(config.codex.includeDeveloperMessages, false);
     assert.ok(warnings.some(w => /claude\.includeSidechain.*must be a boolean/i.test(w)));
     assert.ok(warnings.some(w => /codex\.includeDeveloperMessages.*must be a boolean/i.test(w)));

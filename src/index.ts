@@ -180,12 +180,18 @@ async function walkJsonl(
   return results;
 }
 
-// Discovery of subagent transcripts (§ includeSidechain, v1.5.0). Recent Claude
-// Code versions store a subagent's conversation not as isSidechain entries
-// inside the main session file but in a separate
-// `<root>/<session id>/subagents/*.jsonl`. Only when includeSidechain is on, we
-// additionally read what sits directly under subagents/ for each directory
-// immediately below a root (no deeper recursion — the same reach as cclog).
+// Discovery of subagent transcripts (v1.5.0). Recent Claude Code versions store
+// a subagent's conversation not as isSidechain entries inside the main session
+// file but in a separate `<root>/<session id>/subagents/*.jsonl`. We read what
+// sits directly under subagents/ for each directory immediately below a root (no
+// deeper recursion — the same reach as cclog).
+//
+// This runs regardless of `claude.includeSubagents`. Excluding these files at
+// DISCOVERY time is the mistake spec §8/§9.1 exists to prevent: --backup-jsonl
+// copies from the discovered set, so a discovery-time exclusion would silently
+// stop preserving the raw logs as well, and per-session output could no longer
+// tell "this child's Markdown is stale" from "no such log exists" (§6.1, §11).
+// Hiding is a decision about the MARKDOWN, taken in one place, much later.
 async function listSubagentJsonl(rootDir: string, out: OutputSink): Promise<string[]> {
   let entries: Array<{ name: string; isDirectory(): boolean; isFile(): boolean }>;
   try {
@@ -223,8 +229,16 @@ async function discoverFiles(roots: RootRef[], out: OutputSink): Promise<Discove
     if (!st.isDirectory()) continue;
     const visited = new Set<string>();
     const files = (await walkJsonl(root.dir, root.recursive, visited, out)).sort();
+    // Remember which paths came from a `subagents/` directory rather than
+    // re-deriving it from the path later: the reader needs to know that the
+    // whole file is a subagent transcript even when its records carry no
+    // `isSidechain` flag (spec §4.2).
+    const fromSubagentDir = new Set<string>();
     if (root.scanSubagentDirs) {
-      files.push(...(await listSubagentJsonl(root.dir, out)).sort());
+      for (const f of (await listSubagentJsonl(root.dir, out)).sort()) {
+        fromSubagentDir.add(f);
+        files.push(f);
+      }
     }
     for (const f of files) {
       const id = await fileIdentity(f);
@@ -234,7 +248,12 @@ async function discoverFiles(roots: RootRef[], out: OutputSink): Promise<Discove
       // Carry the four attributes taken at discovery time (before reading).
       // The incremental re-parse cache decides identity from them; a file we
       // could not stat gets undefined, which means "always re-read".
-      found.push({ filePath: f, root, snapshot: id?.snapshot });
+      found.push({
+        filePath: f,
+        root,
+        snapshot: id?.snapshot,
+        ...(fromSubagentDir.has(f) ? { subagentDir: true } : {}),
+      });
     }
   }
   return found;
@@ -280,6 +299,15 @@ function analysisFingerprint(config: CcxlogConfig, opts: CliOptions, ctx: Filter
     // reintroduce the accident of reusing a slimmed session — read during a
     // no-reference cycle — in a cycle that does reference Progress.
     progressRetained: progressDataNeeded(config),
+    // The RESOLVED subagent display values (spec §12). `config` already carries
+    // them, so this is redundant today; it is folded in separately for the same
+    // reason as `progressRetained` — narrowing the fingerprint later must not be
+    // able to reintroduce a cycle that reuses an analysis taken under the other
+    // setting.
+    includeSubagents: {
+      claude: config.claude.includeSubagents,
+      codex: config.codex.includeSubagents,
+    },
     mode: opts.mode,
     projectPath: ctx.projectPath,
     canonicalProjectPath: ctx.canonicalProjectPath,
@@ -525,6 +553,30 @@ async function run(
   // before ccxlogids are assigned, since the ids depend on which pairs survive.
   const inherited = removeInheritedHistory(sessionUnified);
 
+  // Subagent display filter (spec §8 step 7). It is deliberately the LAST thing
+  // that removes a pair, and it happens in exactly one place for both sources:
+  //  - after discovery and the full parse, so hiding never stops a raw log from
+  //    being found or backed up (§7.3, §9.1);
+  //  - after removeInheritedHistory(), so the answers, progress and token counts
+  //    that only a Codex child recorded have already been merged into the
+  //    surviving ancestor pair (§7.2, §8);
+  //  - before assignCcxids(), so ids are given to the blocks that are actually
+  //    written and to nothing else (§8 step 8).
+  // A session that loses every pair stays in `sessionUnified` as a 0-pair
+  // session, which is what lets per-session output clean up the Markdown it owns
+  // instead of leaving a stale file behind (§10.2, §11).
+  const hiddenBySource: Record<Source, number> = { claude: 0, codex: 0 };
+  for (const su of sessionUnified) {
+    const show = su.adapter.id === 'claude'
+      ? config.claude.includeSubagents
+      : config.codex.includeSubagents;
+    if (show) continue;
+    const kept = su.pairs.filter(p => !p.isSubagent);
+    hiddenBySource[su.adapter.id] += su.pairs.length - kept.length;
+    su.pairs = kept;
+  }
+  const hiddenTotal = hiddenBySource.claude + hiddenBySource.codex;
+
   const allPairs: UnifiedPair[] = [];
   for (const su of sessionUnified) allPairs.push(...su.pairs);
   assignCcxids(allPairs);
@@ -546,7 +598,16 @@ async function run(
   // Terminate condition (§3.3/§10-1): total adopted pairs == 0.
   // Under watch this is not a reason to stop but a failed cycle; once logs
   // appear, later cycles recover on their own (§10.1).
-  if (allPairs.length === 0) {
+  //
+  // Two very different situations arrive here, and only one of them is a
+  // failure (spec §10). "Nothing belonging to this project could be found" is
+  // still a runtime error that leaves the existing Markdown alone. But when
+  // recognised, belonging data DID exist and `includeSubagents: false` is what
+  // removed the last of it — a project whose logs are subagent transcripts only
+  // — the run did exactly what it was configured to do. Failing there would
+  // leave the previous output in place, still showing the very blocks the user
+  // just asked to hide, so it converges to 0 pairs and succeeds instead.
+  if (allPairs.length === 0 && hiddenTotal === 0) {
     out.error('No pairs found for the selected source(s). Candidate log directories:');
     for (const ar of adapterRuns) {
       for (const r of ar.roots) out.error(`  - [${ar.adapter.id}] ${r.dir}`);
@@ -559,13 +620,27 @@ async function run(
   // names the replays that were KEPT because the child's copy held an answer or
   // progress the ancestor could not absorb — the case where a silent removal
   // would lose content.
-  if (inherited.removed > 0 || inherited.conflicts > 0) {
+  //
+  // Counted over the pairs that SURVIVED the display filter: a conflict kept for
+  // the child's sake and then hidden by `includeSubagents: false` is not in the
+  // output, and reporting it as "kept" would send the user looking for a block
+  // that is not there (§13).
+  const survivingPairs = new Set(allPairs);
+  const keptConflicts = inherited.conflictEntries.filter(c => survivingPairs.has(c.pair));
+  if (inherited.removed > 0 || keptConflicts.length > 0) {
     out.log(`Removed ${inherited.removed} pair(s) of parent history re-recorded into subagent sessions`
       + `${inherited.merged > 0 ? ` (merged data from ${inherited.merged} into surviving pairs)` : ''}`
-      + `${inherited.conflicts > 0 ? `; kept ${inherited.conflicts} the original could not absorb` : ''}.`);
+      + `${keptConflicts.length > 0 ? `; kept ${keptConflicts.length} the original could not absorb` : ''}.`);
     if (opts.verbose) {
-      for (const note of inherited.conflictNotes) out.log(`  kept (differing ${note})`);
+      for (const c of keptConflicts) out.log(`  kept (differing ${c.note})`);
     }
+  }
+
+  // Which blocks the setting removed, per source (§13). Under --verbose only:
+  // with the default (true) it is always zero, and a user who turned subagents
+  // off does not need to be told so on every run.
+  if (opts.verbose && hiddenTotal > 0) {
+    out.log(`Hidden by includeSubagents: ${hiddenBySource.claude} claude pair(s), ${hiddenBySource.codex} codex pair(s).`);
   }
 
   if (!opts.dryRun) await fs.mkdir(opts.outDir, { recursive: true });
@@ -954,8 +1029,16 @@ async function backupJsonl(opts: CliOptions, adapterRuns: AdapterRun[], out: Out
       });
     }
     // Claude subagent transcripts are always included in a backup regardless of
-    // the includeSidechain setting (v1.5.0): whether to DISPLAY them and whether
-    // to PRESERVE the logs are separate questions.
+    // includeSubagents (spec §9.1): whether to DISPLAY them and whether to
+    // PRESERVE the logs are separate questions. Discovery no longer depends on
+    // the setting either, so the loop above already picks these up; it is kept
+    // as the direct guarantee of §9.1, and it also catches a transcript that was
+    // dropped for an unrelated reason (an unreadable or unrecognised file).
+    //
+    // Codex needs no counterpart: a subagent rollout lives in the same tree as
+    // every other rollout, is discovered by the same walk, and reaches this
+    // point through `belongingPaths` because --backup-jsonl returns before the
+    // display filter ever runs (spec §8 step 4 precedes step 7).
     if (ar.adapter.id === 'claude') {
       for (const root of ar.roots) {
         for (const f of await listSubagentJsonl(root.dir, out)) {

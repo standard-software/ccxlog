@@ -198,6 +198,7 @@ export function toUnifiedPair(p: UnifyParams): UnifiedPair {
     sourceFileRelativeId: p.sourceFileRelativeId,
     questionEventUuid: pair.questionEntry.uuid || undefined,
     questionOrdinal: p.questionOrdinal,
+    isSubagent: pair.isSubagent === true,
     questionTimestampRaw: raw,
     questionTimestampMs: Number.isNaN(ms) ? null : ms,
     question: buildQuestion(pair),

@@ -26,6 +26,24 @@ export function buildPairs(entries: LogEntry[]): Pair[] {
         if (current) current.progressEntries.push(entry);
         continue;
       }
+      // A reply coming back UP from a subagent is the delegator's own result,
+      // so it is progress inside the pair that delegated the work — never a
+      // question. This is what makes a Codex delegation render like a Claude
+      // one: there the Task result arrives as a tool_result and the parent's
+      // block stays "human question -> final answer", whereas filing the reply
+      // as a question split that block in two and left the parent's real answer
+      // stranded on a block whose question was the machine text
+      // `Message Type: FINAL_ANSWER ...`. It also stopped `includeSubagents:
+      // false` from doing what its name promises, since the child's words were
+      // still on show in the parent's copy.
+      //
+      // With no pair open there is nothing to attach to, so the reply keeps its
+      // old behaviour and opens one — losing the record would be worse than an
+      // odd-looking block, and a rollout can legitimately begin mid-delegation.
+      if (entry.isDelegateReply && current) {
+        current.progressEntries.push(entry);
+        continue;
+      }
       // An instruction handed to a subagent ALWAYS opens its own pair, even
       // when the pair before it has neither an answer nor any progress
       // (jsonlReader.ts sets isReceivedInstruction). Two things break without

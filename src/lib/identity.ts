@@ -9,12 +9,24 @@ function questionKeyOf(u: UnifiedPair): string {
     : sha256Hex(u.question);
 }
 
-// Assign collisionOrdinal within each (source, sessionId, questionTimestampRaw)
-// group, then compute the ccxlogId. Mutates each pair's internal `ccxid` field.
+// Assign collisionOrdinal within each (source, sessionId, questionTimestampRaw,
+// subagent?) group, then compute the ccxlogId. Mutates each pair's internal
+// `ccxid` field.
+//
+// The subagent flag is part of the GROUP key but NOT of the id material, and it
+// is there for one reason: turning `includeSubagents` on must add blocks and
+// change none (spec §5.2, §13). A Claude session log holds its subagent
+// conversation inline, so without the split a sidechain question recorded in the
+// same millisecond as an ordinary one would join that one's collision group and
+// shift its ordinal — silently moving the ccxlogid of a block that has nothing
+// to do with subagents. Keeping the two sets of groups apart makes the ordinals
+// of the ordinary blocks depend only on the ordinary blocks, exactly as they did
+// before the option existed. Codex is unaffected either way: there a subagent is
+// always a separate session, so its pairs never shared a group to begin with.
 export function assignCcxids(pairs: UnifiedPair[]): void {
   const groups = new Map<string, UnifiedPair[]>();
   for (const p of pairs) {
-    const key = `${p.source}\0${p.sessionId}\0${p.questionTimestampRaw}`;
+    const key = `${p.source}\0${p.sessionId}\0${p.questionTimestampRaw}\0${p.isSubagent ? 'sub' : ''}`;
     const arr = groups.get(key);
     if (arr) arr.push(p); else groups.set(key, [p]);
   }

@@ -33,13 +33,21 @@ export interface CcxlogConfig {
     outputAllFileName: string;
     outputSessionFilePrefix: string;
     extraLogDirs: RootSpec[];
-    includeSidechain: boolean;
+    // The RESOLVED display setting for subagent conversations (spec §5).
+    // `claude.includeSubagents` is the official key; `claude.includeSidechain`
+    // is kept as its supported former name and resolved into this one field, so
+    // nothing downstream has to know that two spellings exist.
+    includeSubagents: boolean;
   };
   codex: {
     outputAllFileName: string;
     outputSessionFilePrefix: string;
     extraLogDirs: RootSpec[];
     includeDeveloperMessages: boolean;
+    // Codex has one spelling only: `codex.includeSubagents`. `includeSidechain`
+    // is a Claude-log term and is deliberately NOT accepted here (spec §5.3), so
+    // it falls through to the ordinary unknown-key warning.
+    includeSubagents: boolean;
   };
 }
 
@@ -56,13 +64,16 @@ export function defaultConfig(): CcxlogConfig {
       outputAllFileName: 'cclog.md',
       outputSessionFilePrefix: 'cclog_',
       extraLogDirs: [],
-      includeSidechain: false,
+      // Both sources default to true (spec §5.1): a complete conversation record
+      // is the standard behaviour, and it makes the migration purely additive.
+      includeSubagents: true,
     },
     codex: {
       outputAllFileName: 'cxlog.md',
       outputSessionFilePrefix: 'cxlog_',
       extraLogDirs: [],
       includeDeveloperMessages: false,
+      includeSubagents: true,
     },
   };
 }
@@ -162,6 +173,42 @@ function asBool(v: unknown, fallback: boolean, label: string, warnings: string[]
   return fallback;
 }
 
+// Read a boolean config value that may be absent. Unlike asBool() this reports
+// "not specified" as undefined instead of substituting a default, because the
+// caller has to tell an unset key apart from one that was explicitly set to the
+// default value (spec §5.2). A non-boolean value warns exactly as asBool does
+// and then resolves as unspecified (§5.2 rule 5).
+function asOptionalBool(v: unknown, fallback: boolean, label: string, warnings: string[]): boolean | undefined {
+  if (v === undefined) return undefined;
+  if (typeof v === 'boolean') return v;
+  warnings.push(`Warning: ${label} must be a boolean; using default (${fallback}).`);
+  return undefined;
+}
+
+// Resolve claude.includeSubagents from the official key and its former name
+// (spec §5.2). The two spellings mean the same thing, so agreeing values are
+// accepted and a genuine disagreement is fatal: silently preferring one of them
+// would make the run do the opposite of what half the config asks for, and the
+// choice would be invisible in the output.
+function resolveClaudeIncludeSubagents(
+  official: boolean | undefined,
+  legacy: boolean | undefined,
+  fallback: boolean,
+  errors: string[],
+): boolean {
+  if (official !== undefined && legacy !== undefined && official !== legacy) {
+    errors.push(
+      `claude.includeSubagents (${official}) and claude.includeSidechain (${legacy}) are set to different values. `
+      + 'They are the same setting under two names; set them to the same value, or keep only claude.includeSubagents.',
+    );
+    // The value is unusable, but loadConfig reports every error it can find in
+    // one pass rather than stopping here; the caller aborts before any side
+    // effect, so what is returned is never acted on.
+    return fallback;
+  }
+  return official ?? legacy ?? fallback;
+}
+
 // Read a string config value. A present-but-non-string value is a silent path
 // to writing an unintended file (§4.1), so warn — symmetrically with asBool —
 // rather than defaulting quietly.
@@ -173,15 +220,15 @@ function asString(v: unknown, fallback: string, label: string, warnings: string[
 }
 
 const TOP_KEYS = new Set(['extraCwds', 'includeSubdirectories', 'watchIntervalSeconds', 'outputAllFileName', 'template', 'claude', 'codex']);
-const CLAUDE_KEYS = new Set(['outputAllFileName', 'outputSessionFilePrefix', 'extraLogDirs', 'includeSidechain']);
-const CODEX_KEYS = new Set(['outputAllFileName', 'outputSessionFilePrefix', 'extraLogDirs', 'includeDeveloperMessages']);
+const CLAUDE_KEYS = new Set(['outputAllFileName', 'outputSessionFilePrefix', 'extraLogDirs', 'includeSubagents', 'includeSidechain']);
+const CODEX_KEYS = new Set(['outputAllFileName', 'outputSessionFilePrefix', 'extraLogDirs', 'includeDeveloperMessages', 'includeSubagents']);
 
 function checkUnknownKeys(obj: Record<string, unknown>, warnings: string[]): void {
   for (const key of Object.keys(obj)) {
     if (TOP_KEYS.has(key)) continue;
     if (key === 'recursive') {
       warnings.push('Warning: config key "recursive" is not supported; recursion is selected automatically for each source.');
-    } else if (key === 'includeSidechain' || key === 'includeDeveloperMessages') {
+    } else if (key === 'includeSubagents' || key === 'includeSidechain' || key === 'includeDeveloperMessages') {
       warnings.push(`Warning: unknown top-level config key "${key}"; put it under "claude.*" or "codex.*".`);
     } else if (key === 'source' || key === 'sources') {
       warnings.push(`Warning: config key "${key}" is not supported; the source is selected on the CLI (-cc/-cx).`);
@@ -280,7 +327,16 @@ export async function loadConfig(
   config.codex.outputAllFileName = asString(codex.outputAllFileName, config.codex.outputAllFileName, 'codex.outputAllFileName', warnings);
   config.claude.outputSessionFilePrefix = asString(claude.outputSessionFilePrefix, config.claude.outputSessionFilePrefix, 'claude.outputSessionFilePrefix', warnings);
   config.codex.outputSessionFilePrefix = asString(codex.outputSessionFilePrefix, config.codex.outputSessionFilePrefix, 'codex.outputSessionFilePrefix', warnings);
-  config.claude.includeSidechain = asBool(claude.includeSidechain, config.claude.includeSidechain, 'claude.includeSidechain', warnings);
+  // Subagent display (spec §5.2). The official key and its former name are read
+  // separately — a value of `undefined` here means "not specified", which is
+  // what the resolution rules are written in terms of.
+  config.claude.includeSubagents = resolveClaudeIncludeSubagents(
+    asOptionalBool(claude.includeSubagents, config.claude.includeSubagents, 'claude.includeSubagents', warnings),
+    asOptionalBool(claude.includeSidechain, config.claude.includeSubagents, 'claude.includeSidechain', warnings),
+    config.claude.includeSubagents,
+    errors,
+  );
+  config.codex.includeSubagents = asBool(codex.includeSubagents, config.codex.includeSubagents, 'codex.includeSubagents', warnings);
   config.codex.includeDeveloperMessages = asBool(codex.includeDeveloperMessages, config.codex.includeDeveloperMessages, 'codex.includeDeveloperMessages', warnings);
   config.claude.extraLogDirs = asRootSpecArray(claude.extraLogDirs, 'claude.extraLogDirs', warnings);
   config.codex.extraLogDirs = asRootSpecArray(codex.extraLogDirs, 'codex.extraLogDirs', warnings);

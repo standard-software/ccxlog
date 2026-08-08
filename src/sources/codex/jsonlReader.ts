@@ -170,6 +170,33 @@ function instructionItemId(payload: Raw): string {
   return id.startsWith('amsg_') || id.startsWith('msg_') ? id : '';
 }
 
+// Which WAY did this inter-agent message travel? A message coming UP from a
+// subagent is the delegator's own result and belongs in progress; a message
+// coming DOWN from a parent is work assigned to this session and opens a block.
+//
+// Direction is read from the addressing pair, not from the `Message Type` line,
+// because the task path is unambiguous and type-independent: agent paths nest
+// (`/root` delegates to `/root/r1_review`), so the sender being BELOW the
+// recipient is exactly "my subagent replied to me".
+//
+//   parent rollout:  author=/root/janken_2  recipient=/root            -> up
+//   child rollout:   author=/root           recipient=/root/janken_2   -> down
+//
+// `MESSAGE` is why the type line alone will not do: it is the one type observed
+// travelling both ways (36 up, 5 down), so classifying it by name would either
+// bury a follow-up instruction in a child's progress or promote a child's status
+// report to a question in the parent. Type is consulted only as a fallback for
+// records that carry no usable author/recipient pair.
+function isDelegateReplyItem(payload: Raw): boolean {
+  const author = text(payload.author);
+  const recipient = text(payload.recipient);
+  if (author && recipient && author !== recipient) {
+    if (author.startsWith(`${recipient}/`)) return true;   // up: from my subagent
+    if (recipient.startsWith(`${author}/`)) return false;  // down: from my parent
+  }
+  return /^Message Type:\s*FINAL_ANSWER\b/m.test(messageText(payload.content));
+}
+
 // An instruction's turn id lives in the passthrough block — neither at the top
 // level nor at payload.turn_id — and it matters because the instruction is
 // recorded BEFORE the turn it starts opens, so the reader's running turn id
@@ -314,15 +341,23 @@ export async function readJsonl(filePath: string, includeDeveloperMessages = fal
   const pushUser = (
     content: string,
     timestamp: string,
-    instruction?: { turnId: string; msgId: string },
+    instruction?: { turnId: string; msgId: string; delegateReply: boolean },
   ): void => {
     const ownTurnId = instruction?.turnId || turnId;
+    // A delegate reply is pushed through this same path, and therefore still
+    // consumes a `u-` number and a turn-user index, even though pairBuilder will
+    // file it as progress. That is deliberate: the `u-N` uuid IS the ccxlogId's
+    // question key for Codex, so skipping the counter would renumber every later
+    // question in the session and silently reissue the ids of blocks that have
+    // nothing to do with subagents. Keeping the counter intact confines the id
+    // change to the reclassified records themselves.
     const entry: UserEntry = {
       type: 'user', uuid: `u-${sequence++}`,
       message: { role: 'user', content }, ...common(timestamp), turnId: ownTurnId,
     };
     if (instruction) {
       entry.isReceivedInstruction = true;
+      if (instruction.delegateReply) entry.isDelegateReply = true;
       if (instruction.msgId) entry.replayMsgId = instruction.msgId;
     }
     // The turn key is fixed at PUSH time: the running turn id moves on at the
@@ -509,6 +544,8 @@ export async function readJsonl(filePath: string, includeDeveloperMessages = fal
       // The `Message Type` in the body (NEW_TASK / MESSAGE / FINAL_ANSWER /
       // whatever is added later) is deliberately NOT used to filter: narrowing
       // to NEW_TASK would silently drop the 3 observed MESSAGE follow-ups.
+      // Every one of them is recorded; isDelegateReplyItem() only decides
+      // afterwards which of them is a question and which is progress.
       flushFallback();
       // Only `input_text` blocks: the observed content mixes in an
       // `encrypted_content` block whose payload is a very large Base64 blob,
@@ -518,6 +555,7 @@ export async function readJsonl(filePath: string, includeDeveloperMessages = fal
         pushUser(value, timestamp, {
           turnId: instructionTurnId(payload),
           msgId: instructionItemId(payload),
+          delegateReply: isDelegateReplyItem(payload),
         });
       }
       // sawUserEvent is deliberately NOT set: the instruction is not a

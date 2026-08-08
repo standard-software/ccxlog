@@ -42,6 +42,18 @@ export const codexAdapter: SourceAdapter = {
   async readSession(file: DiscoveredFile, cfg: CcxlogConfig): Promise<SessionData> {
     const r = await readJsonl(file.filePath, cfg.codex.includeDeveloperMessages);
     const rolloutBase = path.basename(file.filePath).replace(/\.jsonl$/, '');
+    // Pair boundaries (decided from the presence of in-progress entries) are
+    // settled entirely inside buildPairs(). Discarding happens afterwards, so
+    // the boundaries do not move (lib/progressData.ts).
+    const pairs = applyProgressRetention(buildPairs(r.entries), cfg);
+    // Subagent-ness is a property of the ROLLOUT, decided by the authoritative
+    // session_meta alone (`thread_source === "subagent"` or `source.subagent`;
+    // never `forked_from_id`, see threadIdentityOf). So every pair of a subagent
+    // rollout is a subagent pair — including a grandchild's, and including the
+    // conflicting copies the inherited-history pass deliberately keeps (spec
+    // §7.2). Marking them here does NOT hide them: the display filter runs after
+    // that matching, so the child's data still reaches its ancestor first.
+    if (r.thread.isSubagent) for (const p of pairs) p.isSubagent = true;
     return {
       source: 'codex',
       sessionId: r.sessionId || rolloutBase,
@@ -52,10 +64,7 @@ export const codexAdapter: SourceAdapter = {
       fromExplicitRoot: file.root.origin === 'extra',
       fileContentHash: r.fileContentHash,
       eventIdStream: r.eventIdStream,
-      // Pair boundaries (decided from the presence of in-progress entries) are
-      // settled entirely inside buildPairs(). Discarding happens afterwards, so
-      // the boundaries do not move (lib/progressData.ts).
-      allPairs: applyProgressRetention(buildPairs(r.entries), cfg),
+      allPairs: pairs,
       skippedLines: r.skippedLines,
       formatRecognized: r.formatRecognized,
       thread: r.thread,

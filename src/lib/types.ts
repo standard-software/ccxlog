@@ -36,12 +36,18 @@ export interface UserEntry {
   // message without trusting the timestamp.
   replayMsgId?: string;    // the response_item message-item id (`msg_…`), stable across files
   replayTurnKey?: string;  // `<turn_id>#<index of this user message within the turn>`
-  // Codex only: an instruction DELIVERED TO this subagent (the response_item
-  // agent_message that directly follows inter_agent_communication_metadata).
-  // It opens a Q&A boundary exactly like a human question does — this single
-  // flag is both the detection result and the pairBuilder split condition
-  // (sources/codex/pairBuilder.ts), so the two can never drift apart.
+  // Codex only: an inter-agent message DELIVERED TO this session (the
+  // response_item agent_message that directly follows
+  // inter_agent_communication_metadata). Detection result only — whether it
+  // opens a Q&A boundary is decided by isDelegateReply below.
   isReceivedInstruction?: boolean;
+  // Codex only: this received message came UP from a subagent this session
+  // delegated to (a FINAL_ANSWER, or a mid-task MESSAGE from the child), rather
+  // than DOWN from a parent assigning work. Such a record is the delegator's own
+  // tool result, not a question put to it, so it is filed as progress — matching
+  // Claude, where a Task result arrives as a tool_result inside the delegating
+  // pair and never opens a block of its own.
+  isDelegateReply?: boolean;
   progressKey?: string;    // Codex only — see AssistantEntry.progressKey
 }
 
@@ -91,6 +97,18 @@ export interface Pair {
   additionalQuestionEntries: UserEntry[];
   progressEntries: Array<UserEntry | AssistantEntry>;
   finalAssistantEntry: AssistantEntry | null;
+  // Does this pair belong to a SUBAGENT conversation? (`includeSubagents`,
+  // spec §6). It is set where the fact is known and nowhere else:
+  //  - Claude: on every pair built from the `isSidechain` stream of a session
+  //    log, and on every pair of a `<session id>/subagents/*.jsonl` transcript
+  //    (that file IS a subagent transcript whether or not its entries happen to
+  //    carry `isSidechain`).
+  //  - Codex: on every pair of a rollout whose authoritative `session_meta`
+  //    says `thread_source === "subagent"` or carries `source.subagent`.
+  // The display filter reads it, and nothing else does — discovery, parsing,
+  // belonging selection and the inherited-history matching all run over hidden
+  // pairs exactly as they do over visible ones (spec §7.3, §8).
+  isSubagent?: boolean;
 }
 
 // Out-of-source values stay undefined so a known 0 is distinguishable from
@@ -113,6 +131,10 @@ export interface UnifiedPair {
   sourceFileRelativeId: string;       // namespaced stable id (§5.5)
   questionEventUuid?: string;
   questionOrdinal: number;            // question order within the session, answer-independent
+  // Carried over from `Pair.isSubagent`. The display filter (`includeSubagents`)
+  // is applied to UnifiedPairs, after the Codex inherited-history matching and
+  // before ccxlogids are assigned (spec §8).
+  isSubagent: boolean;
   questionTimestampRaw: string;
   questionTimestampMs: number | null;
   question: string;

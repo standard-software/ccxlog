@@ -5,7 +5,7 @@ import { encodeCwd, getClaudeProjectsDir, sha256HexBytes, canonicalPathString, c
 import type { SourceAdapter, RootRef, DiscoveredFile, SessionData, FilterContext } from '../adapter.js';
 import { applyProgressRetention } from '../../lib/progressData.js';
 import { readJsonl } from './jsonlReader.js';
-import { buildPairs, extractSessionName } from './pairBuilder.js';
+import { buildPairsSplit, extractSessionName } from './pairBuilder.js';
 
 function sessionIdFor(rootDir: string, filePath: string): string {
   const rel = path.relative(rootDir, filePath).replace(/\.jsonl$/, '');
@@ -58,13 +58,14 @@ export const claudeAdapter: SourceAdapter = {
       origin: 'standard' as const,
       stableRootKey: 'std',
       recursive: false,
-      scanSubagentDirs: cfg.claude.includeSidechain,
+      scanSubagentDirs: true,
     }));
     for (const spec of cfg.claude.extraLogDirs) {
       // Relative extraLogDirs resolve against <out>, not cwd (§4.2).
       const dir = path.resolve(outDir, spec.dir);
       const stableRootKey = spec.key ?? sha256HexBytes(canonicalPathString(dir), 12);
-      roots.push({ dir, origin: 'extra', stableRootKey, recursive: false, scanSubagentDirs: cfg.claude.includeSidechain });
+      roots.push({ dir, origin: 'extra', stableRootKey, recursive: false, scanSubagentDirs: true });
+      // (scanSubagentDirs is unconditional: see RootRef.scanSubagentDirs.)
     }
     return roots;
   },
@@ -79,7 +80,7 @@ export const claudeAdapter: SourceAdapter = {
   // become standard-origin RootRefs (stableRootKey 'std'), same as the exact
   // project roots — Claude's filterSession returns belongs:true, so their
   // sessions are kept verbatim.
-  async subdirRoots(projectPath: string, realProjectPath: string, cfg: CcxlogConfig): Promise<RootRef[]> {
+  async subdirRoots(projectPath: string, realProjectPath: string, _cfg: CcxlogConfig): Promise<RootRef[]> {
     const projectsDir = getClaudeProjectsDir();
     const bases = Array.from(new Set([projectPath, realProjectPath]));
     const exact = new Set(bases.map(b => encodeCwd(b)));
@@ -105,7 +106,7 @@ export const claudeAdapter: SourceAdapter = {
       if (!cwd) continue;
       const canonCwd = await canonicalPath(cwd);
       if (!canonBases.some(b => isPathWithin(canonCwd, b))) continue;   // sibling — reject
-      roots.push({ dir, origin: 'standard', stableRootKey: 'std', recursive: false, scanSubagentDirs: cfg.claude.includeSidechain });
+      roots.push({ dir, origin: 'standard', stableRootKey: 'std', recursive: false, scanSubagentDirs: true });
     }
     return roots;
   },
@@ -115,13 +116,21 @@ export const claudeAdapter: SourceAdapter = {
 
   async readSession(file: DiscoveredFile, cfg: CcxlogConfig): Promise<SessionData> {
     const r = await readJsonl(file.filePath);
+    // Both conversations are ALWAYS built, whatever `includeSubagents` says: the
+    // display filter runs much later, on UnifiedPairs (spec §8 step 7). Parsing
+    // is where the two streams are told apart, and nowhere else — see
+    // buildPairsSplit() for why they are not built as one interleaved stream.
+    const split = buildPairsSplit(r.entries);
+    const all = [...split.main, ...split.subagent];
+    // A transcript under `<session id>/subagents/` is a subagent conversation in
+    // its entirety, whether or not its records carry `isSidechain` (spec §4.2,
+    // §6.1). The directory is the authority there; the flag is the authority
+    // inside an ordinary session log.
+    if (file.subagentDir) for (const p of all) p.isSubagent = true;
     // Progress data is discarded AFTER buildPairs() — that is, after
     // slash-command bodies have been recovered (see the rationale in
     // lib/progressData.ts).
-    const pairs = applyProgressRetention(
-      buildPairs(r.entries, { includeSidechain: cfg.claude.includeSidechain }),
-      cfg,
-    );
+    const pairs = applyProgressRetention(all, cfg);
     return {
       source: 'claude',
       // Claude session id is ALWAYS path-based (log-internal sessionId would

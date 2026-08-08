@@ -11,6 +11,7 @@ const allFiles = readdirSync(testsDir)
 const watchFile = path.join('tests', 'watch.test.mjs');
 const embeddedWatchFiles = [
   path.join('tests', 'codexInheritedHistory.test.mjs'),
+  path.join('tests', 'includeSubagents.test.mjs'),
   path.join('tests', 'progressMemory.test.mjs'),
 ];
 
