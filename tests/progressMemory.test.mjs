@@ -76,18 +76,18 @@ function renderCombination(ws, tplKey, modeKey) {
 // ---------------------------------------------------------------------------
 
 const GOLDEN = {
-  'none/ccxlog': '48ccd1901d62bc3623ded7acccb0fe32fb9a0cd988680574dfc124e034d60cc2',
-  'none/cc': '52179e06fee4df63f7cf15696ab270916aaf7c02a64200072a0f7e2b0cef4e27',
-  'none/cx': '88d460ca5af9a9619d455a5d4d53327238fab67bbf9c2df84d1ef20df4405f4f',
-  'summary/ccxlog': '48b39ae2b66a1951ff95c6d18c31415697b9c894ff07dfaa3418891f181ca3e4',
-  'summary/cc': '4fec6ebe52e8e8aaef31c1542391ee23eb4e190e341df66275cea299bfdd80e8',
-  'summary/cx': 'd645f94958a02497bec9e1f8ec6da78a48d2631890f2b7a47c85689b8bca7ac9',
-  'full/ccxlog': 'bf55af274f4786b7666c8de2f15b5b8d15e2745145f54529fd1c50de1150f5bf',
-  'full/cc': '1faebf346db123f4eb358118586aeced103c734a5746532fde2576e2141b982e',
-  'full/cx': 'f17cbde51c417b83c93b9d124dff381040bf811a481d29403b0de3023fc9ce7f',
-  'both/ccxlog': '9b2bd003275c1e821734bf7b6e1f8a2fcdcc680f3c5e3a0ee5b00f41e0663517',
-  'both/cc': '3713dd35f5c8229387ef4cfb8d0bd0004a199e677f62d789341ef4f43337c391',
-  'both/cx': '59d3c3a41eefb8649d22b8bc552998ff205adccd8eca3314afb220bf345160fc',
+  'none/ccxlog': '6609bd17295a8e423a3c8518d82ede4dc78b5e0515d03ba23e9f8d1e219b7bf0',
+  'none/cc': '55f2157f356413218f0d23c3cb315d558a0f8ef0b08a4b558b664b4603b2d30d',
+  'none/cx': 'f7ac15e14b2300dedeb899a8310a43c8f1e220fe6600ff62dea693a9fd70e0d1',
+  'summary/ccxlog': 'aee3cc0e11812682d0c72552615f1551754ab96204558ea05527816e0fbe1094',
+  'summary/cc': '8f21fa266820f03ebd7edaaf9fde99971d6d283b9d09a8636936385a30bca7c6',
+  'summary/cx': '2f7c6823ecca301174dc646b4393bac35e192382a35b1bab04fd338e2c45f152',
+  'full/ccxlog': 'cd9b2580dfce75f06a77f2bbfa2383bead6cb681705cbec7978e139ab9b97cd1',
+  'full/cc': 'ecc5cd5306c689d7a05fd08b68b62ecb80e8b7e37d079a34c613c687271de688',
+  'full/cx': 'd98756d35fcb42a81148cae20bdebc8d21eb6402929323106d2470a716b61113',
+  'both/ccxlog': '041b31c9cc3d4ee7755313b0f4e9ef9b37b69032c213539df0a35e5094e3df36',
+  'both/cc': '0964b3969513339ac02e14999927523a3172f717727e4583509fe9ea5df6bd14',
+  'both/cx': 'b881da36912ecc7d443221e65615686050d67e8daac0a58af371f6cf2d1747ef',
 };
 
 test('P-1: output for three modes and four templates is byte-identical to the baseline', (t) => {
@@ -108,7 +108,7 @@ const GOLDEN_BOTH_CCXLOG = `<!-- ccxlog-owner:ccxlog; kind:aggregate; mode:both 
 - Project: <PROJECT>
 - Source: ClaudeCode, Codex
 
-<!-- ccxlogid:7f39f2d7ad37f6aa87f68fe2 -->
+<!-- ccxlogid:7f39f2d7ad37f6aa87f68fe2 time:1779879600000 -->
 # 2026/05/27 Wed 11:00:00 [ClaudeCode/cc] :sess1
 Model=claude-opus-4-8-inner Version=1.2.3
 Branch=main Cwd=<PROJECT>
@@ -145,7 +145,7 @@ output line 11
 - [Tool: Bash] {"command":"echo done"}
 --------
 
-<!-- ccxlogid:c98429f05050e9896967ef23 -->
+<!-- ccxlogid:c98429f05050e9896967ef23 time:1779880200000 -->
 # 2026/05/27 Wed 11:10:00 [ClaudeCode/cc] :sess1
 Model=claude-sonnet-5 Version=9.9.9
 Branch=feature/x Cwd=<PROJECT>
@@ -164,7 +164,7 @@ Partial thought.
 - [Tool: Write] {"file_path":"C:/x/z.txt"}
 --------
 
-<!-- ccxlogid:7c5499a949ba2038492ab301 -->
+<!-- ccxlogid:7c5499a949ba2038492ab301 time:1779880800000 -->
 # 2026/05/27 Wed 11:20:00 [ClaudeCode/cc] :sess1
 Model=claude-opus-4-8 Version=1.2.3
 Branch=main Cwd=<PROJECT>
@@ -189,7 +189,7 @@ Step 3
 - [Tool: Read] {"file_path":"C:/fixture-home/.claude/commands/mycmd.md"}
 --------
 
-<!-- ccxlogid:759014938c4d43eff1b2810e -->
+<!-- ccxlogid:759014938c4d43eff1b2810e time:1779883260000 -->
 # 2026/05/27 Wed 12:01:00 [Codex/cx] :cx-sess-0001
 Model=gpt-5-codex Version=0.9.9
 Branch=main Cwd=<PROJECT>
@@ -218,7 +218,7 @@ output line 10
 output line 11
 --------
 
-<!-- ccxlogid:b9d1a3b0b0c86e56c9262ab7 -->
+<!-- ccxlogid:b9d1a3b0b0c86e56c9262ab7 time:1779883740000 -->
 # 2026/05/27 Wed 12:09:00 [Codex/cx] :cx-sess-0001
 Model=gpt-5-codex Version=0.9.9
 Branch=main Cwd=<PROJECT>

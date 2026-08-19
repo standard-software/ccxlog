@@ -105,7 +105,7 @@ test('a template without a standalone CcxlogId marker gets one prepended', t => 
   const r = run([ws.project, '--out', ws.out, '-cc'], { home: ws.home });
   assert.equal(r.status, 0, r.stderr);
   const md = read(path.join(ws.out, 'cclog.md'));
-  assert.match(md, /<!-- ccxlogid:[0-9a-f]{24} -->\n# /);
+  assert.match(md, /<!-- ccxlogid:[0-9a-f]{24} time:\d+ -->\n# /);
 });
 
 test('an inline CcxlogId placeholder is display-only and still gets a formal marker prepended', t => {
@@ -117,7 +117,7 @@ test('an inline CcxlogId placeholder is display-only and still gets a formal mar
   const r = run([ws.project, '--out', ws.out, '-cc'], { home: ws.home });
   assert.equal(r.status, 0, r.stderr);
   const md = read(path.join(ws.out, 'cclog.md'));
-  assert.match(md, /<!-- (ccxlogid:[0-9a-f]{24}) -->\n# .*\nID=\1/);
+  assert.match(md, /<!-- (ccxlogid:[0-9a-f]{24}) time:\d+ -->\n# .*\nID=\1/);
 });
 
 test('placeholders inside question/answer content are kept literal (not re-substituted)', t => {

@@ -45,12 +45,12 @@ const finished = (id) => [
   '',
 ].join('\n');
 
-async function planFor(existing, next) {
+async function planFor(existing, next, backupIgnoreSinceMs, backupIgnoreThroughMs) {
   const dir = mkTmp('ccx-bkp-');
   const file = path.join(dir, 'ccxlog.md');
   try {
     fs.writeFileSync(file, existing, 'utf-8');
-    const res = await planWrite(file, next, 'aggregate');
+    const res = await planWrite(file, next, 'aggregate', backupIgnoreSinceMs, backupIgnoreThroughMs);
     assert.equal(res.ok, true, res.ok ? '' : res.error);
     return res.plan;
   } finally { rmrf(dir); }
@@ -92,6 +92,20 @@ test('R2: a rewrite that loses any ID requires a backup', async () => {
   const plan = await planFor(agg(block(A) + block(B)), agg(block(A) + block(C)));
   assert.equal(plan.outcome, 'rewrite');
   assert.equal(plan.backupRequired, true);
+});
+
+test('recent ID loss inside the automatic-backup grace period does not back up', async () => {
+  const now = new Date(2026, 7, 19, 12, 5).getTime();
+  const cutoff = new Date(2026, 7, 19, 11, 55).getTime();
+  // No DateTime heading: the formal marker makes the grace rule independent
+  // of the user's template.
+  const recent = `<!-- ccxlogid:${A} time:${new Date(2026, 7, 19, 12, 0).getTime()} -->\ncustom recent block\n\n`;
+  const old = `<!-- ccxlogid:${B} time:${new Date(2026, 7, 19, 11, 0).getTime()} -->\ncustom old block\n\n`;
+  const recentOnly = await planFor(agg(recent), agg(block(C)), cutoff, now);
+  assert.equal(recentOnly.backupRequired, false);
+  const mixed = await planFor(agg(recent + old), agg(block(C)), cutoff, now);
+  assert.equal(mixed.backupRequired, true);
+  assert.deepEqual(mixed.backupReason.lost.map(x => x.id), [`ccxlogid:${B}`]);
 });
 
 test('R2-2: old content without a valid ccxlogid is indeterminate and requires a backup', async () => {

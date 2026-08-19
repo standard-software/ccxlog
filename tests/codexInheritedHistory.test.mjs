@@ -239,7 +239,7 @@ function occurrences(text, needle) {
 
 // Split a rendered document into per-pair blocks keyed by the block's ccxlogid.
 function blocks(text) {
-  return text.split(/(?=<!-- ccxlogid:[0-9a-f]{24} -->)/).filter(p => p.startsWith('<!-- ccxlogid:'));
+  return text.split(/(?=<!-- ccxlogid:[0-9a-f]{24}(?: time:(?:\d+|unknown))? -->)/).filter(p => p.startsWith('<!-- ccxlogid:'));
 }
 
 function blocksContaining(text, needle) {

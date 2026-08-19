@@ -114,9 +114,11 @@ test('a symlinked log directory is followed during discovery', t => {
   assert.match(read(path.join(ws.out, 'cclog.md')), /behind a symlink/);
 });
 
-test('per-session real filename collision (both prefixes equal) is a write-time error', t => {
+test('per-session prefixes are fixed: configuring them is a fatal config error', t => {
   const ws = workspace(t);
-  // Same session id on both sources + identical prefixes => same target file.
+  // The collision this test used to stage (both prefixes set to 'log_') is no
+  // longer reachable: cclog_ / cxlog_ are fixed and distinct, so the only way
+  // to ask for it is the removed keys — which must stop the run at load time.
   writeJsonl(path.join(ws.ccLogs, 'dup.jsonl'), claudeQA(ws.project, { uuid: 'c' }));
   writeJsonl(path.join(ws.cxLogs, 'dup.jsonl'), codexQA(ws.project, { sessionId: 'dup' }));
   writeConfig(ws.out, {
@@ -125,5 +127,6 @@ test('per-session real filename collision (both prefixes equal) is a write-time 
   });
   const r = run([ws.project, '--out', ws.out, '--per-session'], { home: ws.home });
   assert.equal(r.status, 1);
-  assert.match(r.stderr, /collision/);
+  assert.match(r.stderr, /outputSessionFilePrefix is no longer supported/);
 });
+

@@ -20,7 +20,11 @@ import {
   extractTokenTotals,
   formatTokens,
 } from './metaExtractor.js';
-import { encodeSid64, chooseMethod, regionFromLine, isDestructive } from './identity.js';
+import {
+  encodeSid64, chooseMethod, regionFromLine, isDestructive, lostIds, blockLabels, parseCcxlogId,
+  type BlockMethod,
+} from './identity.js';
+import { appendBackupReason, type BackupReason } from './backup.js';
 import { answerTextHashes, progressSignatureOf, replayIdentityOf } from './replayKey.js';
 import { sha256Hex } from './pathUtils.js';
 import type {
@@ -250,8 +254,11 @@ export function formatPair(u: UnifiedPair, template: string): string {
     Cwd: u.cwd,
     Tokens: formatTokens(u.tokens),
   });
-  if (templateHasCcxlogIdMarker(template)) return rendered;
-  return `<!-- ${u.ccxid} -->\n${rendered}`;
+  const formalMarker = `<!-- ${u.ccxid} time:${u.questionTimestampMs ?? 'unknown'} -->`;
+  if (templateHasCcxlogIdMarker(template)) {
+    return rendered.replace(`<!-- ${u.ccxid} -->`, formalMarker);
+  }
+  return `${formalMarker}\n${rendered}`;
 }
 
 // ---- preambles -----------------------------------------------------------
@@ -393,6 +400,12 @@ export interface WritePlan {
   backupRequired: boolean;              // true only for a rewrite that loses a ccxlogid (or cannot be decided)
   appendTail: string;                   // only meaningful for 'append'
   fingerprint: FileFingerprint | null;  // existing file at plan time (null if absent)
+  // Why the backup is needed, recorded here because planning is the last point
+  // at which the OLD content is in hand — by the time the backup is taken the
+  // caller has only a path (null whenever backupRequired is false).
+  backupReason: BackupReason | null;
+  backupIgnoreSinceMs?: number;
+  backupIgnoreThroughMs?: number;
 }
 
 export type PlanResult = { ok: true; plan: WritePlan } | { ok: false; error: string };
@@ -424,10 +437,19 @@ export async function planWrite(
   filePath: string,
   newContent: string,
   kind: 'aggregate' | 'session',
+  backupIgnoreSinceMs?: number,
+  backupIgnoreThroughMs?: number,
 ): Promise<PlanResult> {
   const ex = await readExisting(filePath);
   if (!ex) {
-    return { ok: true, plan: { filePath, kind, newContent, outcome: 'create', backupRequired: false, appendTail: '', fingerprint: null } };
+    return {
+      ok: true,
+      plan: {
+        filePath, kind, newContent, outcome: 'create',
+        backupRequired: false, appendTail: '', fingerprint: null, backupReason: null,
+        backupIgnoreSinceMs, backupIgnoreThroughMs,
+      },
+    };
   }
   const ownership = kind === 'aggregate' ? checkAggregateOwnership(ex.content) : checkSessionOwnership(ex.content);
   if (ownership === 'unconfirmed') {
@@ -466,8 +488,38 @@ export async function planWrite(
   // decided (no valid id in the old content, malformed ids, duplicates, or a
   // failed parse of the new side = method 'none') isDestructive returns true and
   // the backup is taken, which is the safe direction.
-  const backupRequired = outcome === 'rewrite' && isDestructive(ex.content, newContent, method);
-  return { ok: true, plan: { filePath, kind, newContent, outcome, backupRequired, appendTail, fingerprint: ex.fp } };
+  const backupRequired = outcome === 'rewrite'
+    && isDestructive(ex.content, newContent, method, backupIgnoreSinceMs, backupIgnoreThroughMs);
+  const backupReason = backupRequired
+    ? describeLoss(ex.content, newContent, method, backupIgnoreSinceMs, backupIgnoreThroughMs) : null;
+  return {
+    ok: true,
+    plan: { filePath, kind, newContent, outcome, backupRequired, appendTail, fingerprint: ex.fp,
+      backupReason, backupIgnoreSinceMs, backupIgnoreThroughMs },
+  };
+}
+
+// Name what the rewrite is about to drop, for the record kept beside the backup
+// (backup.ts). Reached only when a backup is already required, so the extra
+// parse of both sides costs nothing on the ordinary path.
+export function describeLoss(oldContent: string, newContent: string, method: BlockMethod, ignoreSinceMs?: number, ignoreThroughMs?: number): BackupReason {
+  const oldParse = parseCcxlogId(oldContent);
+  const newParse = parseCcxlogId(newContent);
+  if (method === 'none') {
+    const why = !oldParse.valid ? 'the old file has duplicate or malformed ccxlogid lines'
+      : oldParse.count === 0 ? 'the old file carries no ccxlogid block marker'
+        : !newParse.valid ? 'the new content has duplicate or malformed ccxlogid lines'
+          : 'the new content carries no ccxlogid block marker';
+    return { kind: 'undecidable', oldCount: oldParse.count, newCount: newParse.count, detail: why };
+  }
+  const ids = lostIds(oldContent, newContent, method, ignoreSinceMs, ignoreThroughMs);
+  const labels = blockLabels(oldContent, ids);
+  return {
+    kind: 'ids-lost',
+    oldCount: oldParse.count,
+    newCount: newParse.count,
+    lost: ids.map(id => ({ id, label: labels.get(id) ?? '' })),
+  };
 }
 
 // Re-check against the plan-time fingerprint (§8.5 step 4). True = the file
@@ -493,24 +545,35 @@ export async function fingerprintChanged(filePath: string, fp: FileFingerprint |
   }
 }
 
+// What to record in the backup folder about this copy. Passed to
+// backupAndVerify rather than written by its callers so that the explanation is
+// produced at the one place a backup is ever taken, and cannot be forgotten on
+// a path someone adds later.
+export interface BackupNote { reason: BackupReason; version: string; }
+
 // Copy filePath into backupDir and verify (exists + size + SHA-256) (§8.5
-// step 3). Returns whether the backup is verified.
-export async function backupAndVerify(filePath: string, backupDir: string): Promise<boolean> {
+// step 3). Returns whether the backup is verified. A verified copy also gets
+// its reason appended to the folder's record; a failed one does not, because
+// nothing was preserved to explain.
+export async function backupAndVerify(filePath: string, backupDir: string, note?: BackupNote): Promise<boolean> {
   try {
     await fs.mkdir(backupDir, { recursive: true });
     const dest = path.join(backupDir, path.basename(filePath));
     await fs.copyFile(filePath, dest);
     const [srcBuf, dstBuf] = await Promise.all([fs.readFile(filePath), fs.readFile(dest)]);
-    return srcBuf.length === dstBuf.length && sha256Hex(srcBuf) === sha256Hex(dstBuf);
+    if (!(srcBuf.length === dstBuf.length && sha256Hex(srcBuf) === sha256Hex(dstBuf))) return false;
   } catch {
     return false;
   }
+  if (note) await appendBackupReason(backupDir, filePath, note.reason, note.version, new Date());
+  return true;
 }
 
 export interface CommitOptions {
   dryRun: boolean;
   alreadyBackedUp: boolean;   // this file's backup was taken+verified in the batch phase
   backupDir?: string;         // for a just-in-time backup if a re-plan becomes a rewrite
+  version?: string;           // recorded in the backup folder alongside a just-in-time backup
 }
 
 export interface CommitResult { result: WriteResult; error?: string; }
@@ -525,6 +588,18 @@ async function performWrite(plan: WritePlan): Promise<CommitResult> {
   return { result: plan.outcome };
 }
 
+// Aggregate + archive are planned as one logical output set. Their caller
+// checks the complete set for loss, then uses this strict commit so an external
+// edit cannot cause an individual-file re-plan with the wrong (file-local)
+// backup semantics.
+export async function commitExactPlan(plan: WritePlan, dryRun: boolean): Promise<CommitResult> {
+  if (dryRun) return { result: plan.outcome };
+  if (await fingerprintChanged(plan.filePath, plan.fingerprint)) {
+    return { result: plan.outcome, error: `${plan.filePath} changed during aggregate-set write; stopping on the safe side.` };
+  }
+  return performWrite(plan);
+}
+
 // Commit a planned write with a just-before-write re-check (§8.5 step 4). Even
 // a planned `noop` is re-checked: if the file changed under us since planning,
 // reporting "noop" would be a lie, so we re-plan once and act on the new plan.
@@ -536,12 +611,18 @@ export async function commitPlan(plan: WritePlan, opts: CommitOptions): Promise<
   }
 
   // The file changed since planning — re-plan exactly once (§8.5).
-  const re = await planWrite(plan.filePath, plan.newContent, plan.kind);
+  const re = await planWrite(
+    plan.filePath, plan.newContent, plan.kind,
+    plan.backupIgnoreSinceMs, plan.backupIgnoreThroughMs,
+  );
   if (!re.ok) return { result: plan.outcome, error: re.error };
   const rp = re.plan;
   if (rp.outcome === 'noop') return { result: 'noop' };
   if (rp.backupRequired && !opts.alreadyBackedUp && opts.backupDir) {
-    if (!(await backupAndVerify(rp.filePath, opts.backupDir))) {
+    const note = rp.backupReason && opts.version
+      ? { reason: rp.backupReason, version: opts.version }
+      : undefined;
+    if (!(await backupAndVerify(rp.filePath, opts.backupDir, note))) {
       return { result: rp.outcome, error: `Backup failed for ${rp.filePath}; not overwriting.` };
     }
   }

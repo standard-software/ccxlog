@@ -10,7 +10,7 @@ import {
   canonicalPath, canonicalPathString, clearCanonicalPathCache, fileIdentity, isPathWithin,
 } from './lib/pathUtils.js';
 import type { PathDep } from './lib/pathUtils.js';
-import { assignCcxids, safeSessionId } from './lib/identity.js';
+import { assignCcxids, safeSessionId, chooseMethod, isDestructive } from './lib/identity.js';
 import { compareUnifiedPairs, dedupePairs, dedupeForkedSessions } from './lib/merge.js';
 import { hasBothProgress, templateHasSource, unknownPlaceholders } from './lib/templates.js';
 import { progressDataNeeded } from './lib/progressData.js';
@@ -21,9 +21,15 @@ import {
   buildSessionPreamble,
   planWrite,
   commitPlan,
+  commitExactPlan,
+  fingerprintChanged,
+  describeLoss,
   backupAndVerify,
   type WritePlan,
+  type BackupNote,
 } from './lib/markdownWriter.js';
+import { archiveNow, splitRecentPairs } from './lib/recentArchive.js';
+import { AGGREGATE_FILE_NAME, ARCHIVE_FILE_NAME, SESSION_FILE_PREFIX } from './lib/outputNames.js';
 import {
   backupFolderName,
   backupJsonlFiles,
@@ -32,6 +38,7 @@ import {
   parseSessionMarker,
   BACKUP_MD_AUTO_DIR,
   type JsonlBackupItem,
+  type BackupReason,
 } from './lib/backup.js';
 import { acquireLock, releaseLock, type LockHandle } from './lib/lock.js';
 import { collectingSink, consoleSink, type OutputSink } from './lib/outputSink.js';
@@ -52,6 +59,14 @@ import type { SourceAdapter, RootRef, DiscoveredFile, SessionData, FilterContext
 import type { CliOptions, UnifiedPair, Source, SourceMode } from './lib/types.js';
 
 const PKG_VERSION = (createRequire(import.meta.url)('../package.json') as { version: string }).version;
+
+// Pair a backup reason with the version that produced it, for the record kept
+// in the automatic backup folder. A plan that somehow reached the backup stage
+// without a reason still gets backed up — the copy is what matters — it just
+// goes unexplained.
+function backupNote(reason: BackupReason | null): BackupNote | undefined {
+  return reason ? { reason, version: PKG_VERSION } : undefined;
+}
 
 const EXIT_OK = 0;
 const EXIT_RUNTIME = 1;
@@ -449,7 +464,7 @@ async function run(
 
   // --backup-md: standalone, reads no jsonl (§9.4). Considers all 3 agg names.
   if (opts.backupMd) {
-    const mdFiles = await listExportedMdFiles(opts.outDir, config);
+    const mdFiles = await listExportedMdFiles(opts.outDir);
     if (mdFiles.length === 0) {
       out.log('No files to back up.');
       return plain(EXIT_OK);
@@ -661,6 +676,8 @@ async function writeAggregate(
   mdBackupDir: string,
   out: OutputSink,
 ): Promise<RunOutcome> {
+  const backupNowMs = archiveNow().getTime();
+  const backupIgnoreSinceMs = backupNowMs - config.autoBackupGraceMinutes * 60_000;
   const sorted = [...allPairs].sort(compareUnifiedPairs);
   // Two-stage dedupe (§6.3): first the conservative per-session logical dedupe
   // (snapshots / prefixes / identical whole files), then the cross-session pass
@@ -672,27 +689,75 @@ async function writeAggregate(
   if (kept.some(p => p.source === 'claude')) labelsPresent.push('ClaudeCode');
   if (kept.some(p => p.source === 'codex')) labelsPresent.push('Codex');
 
-  const aggName = aggregateName(config, opts.mode);
+  const aggName = aggregateName(opts.mode);
+  const archiveName = ARCHIVE_FILE_NAME[opts.mode];
+  const split = splitRecentPairs(kept, config.recentDays);
   const preamble = buildAggregatePreamble(opts.mode, opts.projectPath, aggName, labelsPresent);
-  const content = preamble + kept.map(p => formatPair(p, config.template)).join('');
+  const archivePreamble = buildAggregatePreamble(opts.mode, opts.projectPath, archiveName, labelsPresent);
+  const content = preamble + split.recent.map(p => formatPair(p, config.template)).join('');
+  const archiveContent = archivePreamble + split.archive.map(p => formatPair(p, config.template)).join('');
   const filePath = path.join(opts.outDir, aggName);
+  const archivePath = path.join(opts.outDir, archiveName);
 
   const planned = await planWrite(filePath, content, 'aggregate');
   if (!planned.ok) { out.error(`Error: ${planned.error}`); return outcome({ code: EXIT_RUNTIME, failure: planned.error }); }
   const plan = planned.plan;
 
-  // Backup phase: take + verify the required backup before any write (§8.5).
-  let backedUp = false;
-  if (!opts.dryRun && plan.backupRequired) {
-    if (!(await backupAndVerify(plan.filePath, mdBackupDir))) {
-      out.error(`Error: backup failed for ${plan.filePath}; not overwriting.`);
-      return outcome({ code: EXIT_RUNTIME, failure: `backup failed for ${plan.filePath}; not overwriting.` });
+  // Even when the new archive is empty, plan against an owned empty archive so
+  // its fingerprint and ownership are verified before deletion.
+  const archivePlanned = await planWrite(archivePath, archiveContent, 'aggregate');
+  if (!archivePlanned.ok) { out.error(`Error: ${archivePlanned.error}`); return outcome({ code: EXIT_RUNTIME, failure: archivePlanned.error }); }
+  const archivePlan = archivePlanned.plan;
+  const archiveWanted = split.archive.length > 0;
+
+  const readOld = async (p: WritePlan): Promise<string> => p.fingerprint === null ? '' : fs.readFile(p.filePath, 'utf-8');
+  const [oldRecent, oldArchive] = await Promise.all([readOld(plan), readOld(archivePlan)]);
+  const oldCombined = oldRecent + oldArchive;
+  const newCombined = content + (archiveWanted ? archiveContent : '');
+  const method = chooseMethod(oldCombined, newCombined).method;
+  const backupRequired = oldCombined !== '' && oldCombined !== newCombined
+    && isDestructive(oldCombined, newCombined, method, backupIgnoreSinceMs, backupNowMs);
+  const reason = backupRequired
+    ? describeLoss(oldCombined, newCombined, method, backupIgnoreSinceMs, backupNowMs) : null;
+
+  // The two Markdown files are one logical history. Back up both old members
+  // only when an id disappears from their UNION, never for a normal move across
+  // the recent/archive boundary.
+  let backedUp = 0;
+  if (!opts.dryRun && backupRequired) {
+    for (const oldPlan of [plan, archivePlan]) {
+      if (oldPlan.fingerprint === null) continue;
+      if (!(await backupAndVerify(oldPlan.filePath, mdBackupDir, backupNote(reason)))) {
+        out.error(`Error: backup failed for ${oldPlan.filePath}; not overwriting.`);
+        return outcome({ code: EXIT_RUNTIME, failure: `backup failed for ${oldPlan.filePath}; not overwriting.` });
+      }
+      backedUp++;
     }
-    backedUp = true;
   }
 
-  const commit = await commitPlan(plan, { dryRun: opts.dryRun, alreadyBackedUp: backedUp, backupDir: mdBackupDir });
-  if (commit.error) { out.error(`Error: ${commit.error}`); return outcome({ code: EXIT_RUNTIME, failure: commit.error }); }
+  // Verify the whole set before the first mutation. Creating/updating the
+  // archive comes first so a crash can at worst leave duplicates, not a gap.
+  for (const p of [plan, archivePlan]) {
+    if (!opts.dryRun && await fingerprintChanged(p.filePath, p.fingerprint)) {
+      const msg = `${p.filePath} changed during aggregate-set planning; stopping on the safe side.`;
+      out.error(`Error: ${msg}`);
+      return outcome({ code: EXIT_RUNTIME, failure: msg });
+    }
+  }
+
+  const commits: Array<Awaited<ReturnType<typeof commitExactPlan>>> = [];
+  if (archiveWanted) {
+    commits.push(await commitExactPlan(archivePlan, opts.dryRun));
+    if (commits[0].error) { out.error(`Error: ${commits[0].error}`); return outcome({ code: EXIT_RUNTIME, failure: commits[0].error }); }
+  }
+  const recentCommit = await commitExactPlan(plan, opts.dryRun);
+  commits.push(recentCommit);
+  if (recentCommit.error) { out.error(`Error: ${recentCommit.error}`); return outcome({ code: EXIT_RUNTIME, failure: recentCommit.error }); }
+  let archiveDeleted = false;
+  if (!archiveWanted && archivePlan.fingerprint !== null) {
+    if (!opts.dryRun) await fs.rm(archivePath);
+    archiveDeleted = true;
+  }
 
   out.log(`Mode: aggregate (${aggName}) [${opts.mode}]`);
   // Per-session result lines with unparseable counts, surfaced in aggregate mode
@@ -707,19 +772,26 @@ async function writeAggregate(
   if (opts.verbose && possibleDuplicates > 0) {
     out.log(`Kept ${possibleDuplicates} possible duplicate pair(s) (same question key, not confirmed identical).`);
   }
-  const reportBackup = backedUp || (opts.dryRun && plan.backupRequired);
-  if (reportBackup) out.log(`Backed up 1 pre-overwrite md file to ${mdBackupDir}`);
-  out.log(`Done. ${kept.length} pair(s) total [${commit.result}]${opts.dryRun ? ' (dry run)' : ''}.`);
+  const reportBackup = backedUp > 0 || (opts.dryRun && backupRequired);
+  const reportedBackupCount = opts.dryRun
+    ? [plan, archivePlan].filter(p => p.fingerprint !== null).length
+    : backedUp;
+  const reportedBackupNoun = reportedBackupCount === 1 ? 'file' : 'files';
+  if (reportBackup) out.log(`Backed up ${reportedBackupCount} pre-overwrite md ${reportedBackupNoun} to ${mdBackupDir}`);
+  out.log(`Recent: ${split.recent.length} pair(s) (${config.recentDays} calendar days); archive: ${split.archive.length} pair(s).`);
+  const resultLabel = commits.map(c => c.result).join('+') + (archiveDeleted ? '+delete' : '');
+  out.log(`Done. ${kept.length} pair(s) total [${resultLabel}]${opts.dryRun ? ' (dry run)' : ''}.`);
 
   const writes = emptyWriteCounts();
-  writes[commit.result]++;
+  for (const commit of commits) writes[commit.result]++;
+  if (archiveDeleted) writes.rewrite++;
   return outcome({
     code: EXIT_OK,
     pairs: kept.length,
     writes,
-    changed: commit.result !== 'noop',
-    changeLine: `${kept.length} pair(s) [${commit.result}]${reportBackup ? ' (backed up 1 file)' : ''}`,
-    writeLabel: commit.result,
+    changed: commits.some(c => c.result !== 'noop') || archiveDeleted,
+    changeLine: `${kept.length} pair(s) [${resultLabel}]${reportBackup ? ` (backed up ${reportedBackupCount} ${reportedBackupNoun})` : ''}`,
+    writeLabel: resultLabel,
   });
 }
 
@@ -748,10 +820,12 @@ async function writePerSession(
   mdBackupDir: string,
   out: OutputSink,
 ): Promise<RunOutcome> {
+  const backupNowMs = archiveNow().getTime();
+  const backupIgnoreSinceMs = backupNowMs - config.autoBackupGraceMinutes * 60_000;
   const writeTasks: WriteTask[] = [];
   const deleteCandidates: DeleteTask[] = [];
   for (const su of sessionUnified) {
-    const prefix = su.adapter.sessionFilePrefix(config);
+    const prefix = SESSION_FILE_PREFIX[su.adapter.id];
     const fileName = `${prefix}${safeSessionId(su.session.sessionId, su.session.sourceFileRelativeId)}.md`;
     const filePath = path.join(opts.outDir, fileName);
     if (su.pairs.length === 0) {
@@ -791,7 +865,7 @@ async function writePerSession(
   const legacySeen = new Set<string>();
   for (const [su, legacyId] of legacySessionIds(sessionUnified)) {
     if (liveSessionIds.has(legacyId)) continue;      // the ancestor rollout still owns that file
-    const name = `${su.adapter.sessionFilePrefix(config)}${safeSessionId(legacyId, su.session.sourceFileRelativeId)}.md`;
+    const name = `${SESSION_FILE_PREFIX[su.adapter.id]}${safeSessionId(legacyId, su.session.sourceFileRelativeId)}.md`;
     const filePath = path.join(opts.outDir, name);
     const key = foldName(filePath);
     if (claimedNames.has(key) || legacySeen.has(key)) continue;
@@ -820,7 +894,7 @@ async function writePerSession(
   // Plan all writes (§8.5 step 2). An ownership-unconfirmed target aborts.
   const plans: Array<{ task: WriteTask; plan: WritePlan }> = [];
   for (const t of writeTasks) {
-    const pr = await planWrite(t.filePath, t.content, 'session');
+    const pr = await planWrite(t.filePath, t.content, 'session', backupIgnoreSinceMs, backupNowMs);
     if (!pr.ok) { out.error(`Error: ${pr.error}`); return outcome({ code: EXIT_RUNTIME, failure: pr.error }); }
     plans.push({ task: t, plan: pr.plan });
   }
@@ -833,6 +907,17 @@ async function writePerSession(
     }
   }
 
+  const deleteNeedsBackup = new Map<string, boolean>();
+  const emptyComparison = '<!-- ccxlogid:000000000000000000000000 -->\n';
+  for (const d of deletes) {
+    const oldContent = await fs.readFile(d.filePath, 'utf-8');
+    const method = chooseMethod(oldContent, emptyComparison).method;
+    deleteNeedsBackup.set(
+      d.filePath,
+      isDestructive(oldContent, emptyComparison, method, backupIgnoreSinceMs, backupNowMs),
+    );
+  }
+
   // Backup stage: every rewrite marked backupRequired (only when ccxlogid is
   // lost, v1.4.0 R2) plus every file deletion (equivalent to losing all ids) is
   // taken and verified BEFORE any write or delete happens (§8.5 step 3). A
@@ -841,7 +926,7 @@ async function writePerSession(
   if (!opts.dryRun) {
     for (const { plan } of plans) {
       if (!plan.backupRequired) continue;
-      if (!(await backupAndVerify(plan.filePath, mdBackupDir))) {
+      if (!(await backupAndVerify(plan.filePath, mdBackupDir, backupNote(plan.backupReason)))) {
         const msg = `backup failed for ${plan.filePath}; not writing anything.`;
         out.error(`Error: ${msg}`);
         return outcome({ code: EXIT_RUNTIME, failure: msg });
@@ -849,7 +934,8 @@ async function writePerSession(
       backedUpSet.add(plan.filePath);
     }
     for (const d of deletes) {
-      if (!(await backupAndVerify(d.filePath, mdBackupDir))) {
+      if (!deleteNeedsBackup.get(d.filePath)) continue;
+      if (!(await backupAndVerify(d.filePath, mdBackupDir, backupNote({ kind: 'file-deleted' })))) {
         const msg = `backup failed for ${d.filePath}; not writing anything.`;
         out.error(`Error: ${msg}`);
         return outcome({ code: EXIT_RUNTIME, failure: msg });
@@ -875,6 +961,7 @@ async function writePerSession(
       dryRun: opts.dryRun,
       alreadyBackedUp: backedUpSet.has(plan.filePath),
       backupDir: mdBackupDir,
+      version: PKG_VERSION,
     });
     if (commit.error) {
       out.error(`Error: ${commit.error}`);
@@ -1060,10 +1147,8 @@ async function backupJsonl(opts: CliOptions, adapterRuns: AdapterRun[], out: Out
   return EXIT_OK;
 }
 
-function aggregateName(config: CcxlogConfig, mode: SourceMode): string {
-  if (mode === 'claude') return config.claude.outputAllFileName;
-  if (mode === 'codex') return config.codex.outputAllFileName;
-  return config.outputAllFileName;
+function aggregateName(mode: SourceMode): string {
+  return AGGREGATE_FILE_NAME[mode];
 }
 
 async function resolveRealPath(p: string): Promise<string> {
@@ -1236,14 +1321,16 @@ Options:
   -v, -V, --version      Show version and exit.
   -h, --help             Show this help.
 
-Output filenames are configurable in <out>/ccxlog.config.json:
-  outputAllFileName         merged output (default: ccxlog.md)
-  claude.outputAllFileName  -cc output     (default: cclog.md)
-  codex.outputAllFileName   -cx output     (default: cxlog.md)
-  watchIntervalSeconds      --watch wait    (default: 5, range 1-86400)
+Output file names are fixed: ccxlog.md / cclog.md / cxlog.md, each with a
+matching _archive companion for blocks older than recentDays, and
+cclog_<id>.md / cxlog_<id>.md for --per-session. Use --out to choose the
+directory. Common settings in <out>/ccxlog.config.json:
+  recentDays               local calendar days kept in the main aggregate (default: 8)
+  autoBackupGraceMinutes   ignore ID loss newer than this in auto backups (default: 10)
+  watchIntervalSeconds     --watch wait (default: 5, range 1-86400)
 
-The three aggregate outputs coexist in <out>; each mode only touches its own
-file. Progress rendering is controlled by the template (%Progress% /
+The aggregate families coexist in <out>; each mode only touches its own
+files. Progress rendering is controlled by the template (%Progress% /
 %ProgressFull%).`);
 }
 
@@ -1351,7 +1438,7 @@ async function runWatch(opts: CliOptions): Promise<number> {
     console.log(`  project: ${canonProject}`);
     console.log(opts.perSession
       ? `  output:  per-session files in ${canonOut}`
-      : `  output:  ${path.join(canonOut, aggregateName(pre.config, opts.mode))}`);
+      : `  output:  ${path.join(canonOut, aggregateName(opts.mode))}`);
     console.log(`Press Ctrl+C to stop, or terminate pid ${process.pid} from another terminal (e.g. ${killHint}).`);
     summary = await loop.run();
   } finally {

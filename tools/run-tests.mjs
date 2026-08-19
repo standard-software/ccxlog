@@ -18,7 +18,12 @@ const embeddedWatchFiles = [
 function run(args, extraEnv = {}) {
   const result = spawnSync(process.execPath, args, {
     stdio: 'inherit',
-    env: { ...process.env, ...extraEnv },
+    env: {
+      ...process.env,
+      NODE_ENV: 'test',
+      CCXLOG_TEST_NOW: '2026-01-01T12:00:00',
+      ...extraEnv,
+    },
   });
   if (result.error) throw result.error;
   if (result.status !== 0) process.exit(result.status ?? 1);

@@ -3,6 +3,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DEFAULT_TEMPLATE } from './templates.js';
 import { DEFAULT_INTERVAL_SECONDS, validateIntervalSeconds } from './watchArgs.js';
+import { DEFAULT_RECENT_DAYS } from './recentArchive.js';
 
 // Package root: two levels up from dist/lib/config.js.
 export const PACKAGE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -25,13 +26,12 @@ export interface CcxlogConfig {
   // wait this many seconds -> process". A run without watch reads it but never
   // uses it (which is neither a warning nor an error).
   watchIntervalSeconds: number;
-  outputAllFileName: string;
+  recentDays: number;
+  autoBackupGraceMinutes: number;
   templateRaw: string | undefined;   // raw config value (undefined if unset)
   templateExplicit: boolean;
   template: string;                  // resolved template CONTENT
   claude: {
-    outputAllFileName: string;
-    outputSessionFilePrefix: string;
     extraLogDirs: RootSpec[];
     // The RESOLVED display setting for subagent conversations (spec §5).
     // `claude.includeSubagents` is the official key; `claude.includeSidechain`
@@ -40,8 +40,6 @@ export interface CcxlogConfig {
     includeSubagents: boolean;
   };
   codex: {
-    outputAllFileName: string;
-    outputSessionFilePrefix: string;
     extraLogDirs: RootSpec[];
     includeDeveloperMessages: boolean;
     // Codex has one spelling only: `codex.includeSubagents`. `includeSidechain`
@@ -56,21 +54,18 @@ export function defaultConfig(): CcxlogConfig {
     extraCwds: [],
     includeSubdirectories: true,
     watchIntervalSeconds: DEFAULT_INTERVAL_SECONDS,
-    outputAllFileName: 'ccxlog.md',
+    recentDays: DEFAULT_RECENT_DAYS,
+    autoBackupGraceMinutes: 10,
     templateRaw: undefined,
     templateExplicit: false,
     template: DEFAULT_TEMPLATE,
     claude: {
-      outputAllFileName: 'cclog.md',
-      outputSessionFilePrefix: 'cclog_',
       extraLogDirs: [],
       // Both sources default to true (spec §5.1): a complete conversation record
       // is the standard behaviour, and it makes the migration purely additive.
       includeSubagents: true,
     },
     codex: {
-      outputAllFileName: 'cxlog.md',
-      outputSessionFilePrefix: 'cxlog_',
       extraLogDirs: [],
       includeDeveloperMessages: false,
       includeSubagents: true,
@@ -86,51 +81,11 @@ export interface LoadConfigResult {
   warnings: string[];   // non-fatal
 }
 
-const RESERVED = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i;
 
-function isReservedName(name: string): boolean {
-  // Windows blocks reserved names with ANY extension ("CON.a.b" too), so the
-  // base is everything before the FIRST dot, not just before the last one.
-  const base = name.split('.')[0];
-  return RESERVED.test(base);
-}
 
-function hasControlOrNul(s: string): boolean {
-  for (let i = 0; i < s.length; i++) {
-    const c = s.charCodeAt(i);
-    // C0 + NUL (<=0x1f), DEL (0x7f), and C1 controls (0x80-0x9f).
-    if (c <= 0x1f || c === 0x7f || (c >= 0x80 && c <= 0x9f)) return true;
-  }
-  return false;
-}
 
-function hasPathSep(s: string): boolean {
-  return s.includes('/') || s.includes('\\');
-}
 
-// Validate an aggregate file NAME (not a prefix). Returns an error message or null.
-function validateAggregateName(name: string, label: string): string | null {
-  if (name === '') return `${label} must not be empty.`;
-  if (hasPathSep(name)) return `${label} must not contain path separators (/ or \\): "${name}".`;
-  if (hasControlOrNul(name)) return `${label} must not contain control characters or NUL.`;
-  if (name === '.' || name === '..') return `${label} must not be "." or "..".`;
-  if (path.isAbsolute(name)) return `${label} must not be an absolute path: "${name}".`;
-  if (/[ .]$/.test(name)) return `${label} must not end with a space or period: "${name}".`;
-  if (isReservedName(name)) return `${label} must not be a Windows reserved name: "${name}".`;
-  return null;
-}
 
-// Validate a session-file PREFIX (empty allowed).
-function validatePrefix(name: string, label: string): string | null {
-  if (name === '') return null;
-  if (hasPathSep(name)) return `${label} must not contain path separators (/ or \\): "${name}".`;
-  if (hasControlOrNul(name)) return `${label} must not contain control characters or NUL.`;
-  if (name === '.' || name === '..') return `${label} must not be "." or "..".`;
-  if (path.isAbsolute(name)) return `${label} must not be an absolute path: "${name}".`;
-  if (/[ .]$/.test(name)) return `${label} must not end with a space or period: "${name}".`;
-  if (isReservedName(name)) return `${label} must not be a Windows reserved name: "${name}".`;
-  return null;
-}
 
 function asStringArray(v: unknown, label: string, warnings: string[]): string[] {
   if (v === undefined) return [];
@@ -209,23 +164,61 @@ function resolveClaudeIncludeSubagents(
   return official ?? legacy ?? fallback;
 }
 
-// Read a string config value. A present-but-non-string value is a silent path
-// to writing an unintended file (§4.1), so warn — symmetrically with asBool —
-// rather than defaulting quietly.
-function asString(v: unknown, fallback: string, label: string, warnings: string[]): string {
+
+function asPositiveInteger(v: unknown, fallback: number, label: string, warnings: string[]): number {
   if (v === undefined) return fallback;
-  if (typeof v === 'string') return v;
-  warnings.push(`Warning: ${label} must be a string; using default ("${fallback}").`);
+  if (typeof v === 'number' && Number.isSafeInteger(v) && v >= 1) return v;
+  warnings.push(`Warning: ${label} must be an integer of 1 or greater; using default (${fallback}).`);
   return fallback;
 }
 
-const TOP_KEYS = new Set(['extraCwds', 'includeSubdirectories', 'watchIntervalSeconds', 'outputAllFileName', 'template', 'claude', 'codex']);
-const CLAUDE_KEYS = new Set(['outputAllFileName', 'outputSessionFilePrefix', 'extraLogDirs', 'includeSubagents', 'includeSidechain']);
-const CODEX_KEYS = new Set(['outputAllFileName', 'outputSessionFilePrefix', 'extraLogDirs', 'includeDeveloperMessages', 'includeSubagents']);
+const TOP_KEYS = new Set(['extraCwds', 'includeSubdirectories', 'watchIntervalSeconds', 'recentDays', 'autoBackupGraceMinutes', 'template', 'claude', 'codex']);
+const CLAUDE_KEYS = new Set(['extraLogDirs', 'includeSubagents', 'includeSidechain']);
+const CODEX_KEYS = new Set(['extraLogDirs', 'includeDeveloperMessages', 'includeSubagents']);
+
+// Output file names are no longer configurable (v1.9.0). These keys are a
+// FATAL error rather than an ignored unknown key: ignoring them would quietly
+// move the output to a different file and leave the user's existing one behind
+// under a name nothing reads any more — the silent-loss shape this release
+// exists to remove. Stopping lets the reader rename the file or drop the key
+// deliberately.
+const REMOVED_NAME_KEYS = new Map<string, string>([
+  ['outputAllFileName', 'ccxlog.md'],
+  ['claude.outputAllFileName', 'cclog.md'],
+  ['codex.outputAllFileName', 'cxlog.md'],
+  ['claude.outputSessionFilePrefix', 'cclog_'],
+  ['codex.outputSessionFilePrefix', 'cxlog_'],
+]);
+
+function checkRemovedKeys(
+  obj: Record<string, unknown>,
+  claude: Record<string, unknown>,
+  codex: Record<string, unknown>,
+  errors: string[],
+): void {
+  const present: Array<[string, unknown]> = [
+    ...Object.keys(obj).map(k => [k, obj[k]] as [string, unknown]),
+    ...Object.keys(claude).map(k => [`claude.${k}`, claude[k]] as [string, unknown]),
+    ...Object.keys(codex).map(k => [`codex.${k}`, codex[k]] as [string, unknown]),
+  ];
+  for (const [key] of present) {
+    const fixed = REMOVED_NAME_KEYS.get(key);
+    if (fixed === undefined) continue;
+    errors.push(
+      `${key} is no longer supported: output file names are fixed (${fixed} here). `
+      + 'Use --out to choose the output directory instead, then remove this key. '
+      + 'If output already exists under your own name, rename it first so its history is kept.',
+    );
+  }
+}
 
 function checkUnknownKeys(obj: Record<string, unknown>, warnings: string[]): void {
   for (const key of Object.keys(obj)) {
     if (TOP_KEYS.has(key)) continue;
+    // A removed key is recognised, not unknown: checkRemovedKeys reports it as
+    // a fatal error, and warning "ignoring it" beside that error would be a
+    // contradiction (the run is in fact stopping because of the key).
+    if (REMOVED_NAME_KEYS.has(key)) continue;
     if (key === 'recursive') {
       warnings.push('Warning: config key "recursive" is not supported; recursion is selected automatically for each source.');
     } else if (key === 'includeSubagents' || key === 'includeSidechain' || key === 'includeDeveloperMessages') {
@@ -304,15 +297,16 @@ export async function loadConfig(
     ? obj.claude as Record<string, unknown> : {};
   const codex = (obj.codex && typeof obj.codex === 'object' && !Array.isArray(obj.codex))
     ? obj.codex as Record<string, unknown> : {};
+  checkRemovedKeys(obj, claude, codex, errors);
   for (const key of Object.keys(claude)) {
     if (key === 'recursive') {
       warnings.push('Warning: config key "claude.recursive" is no longer supported; Claude Code log discovery is non-recursive.');
-    } else if (!CLAUDE_KEYS.has(key)) warnings.push(`Warning: unknown "claude.${key}" config key; ignoring it.`);
+    } else if (!CLAUDE_KEYS.has(key) && !REMOVED_NAME_KEYS.has(`claude.${key}`)) warnings.push(`Warning: unknown "claude.${key}" config key; ignoring it.`);
   }
   for (const key of Object.keys(codex)) {
     if (key === 'recursive') {
       warnings.push('Warning: config key "codex.recursive" is no longer supported; Codex log discovery is recursive.');
-    } else if (!CODEX_KEYS.has(key)) warnings.push(`Warning: unknown "codex.${key}" config key; ignoring it.`);
+    } else if (!CODEX_KEYS.has(key) && !REMOVED_NAME_KEYS.has(`codex.${key}`)) warnings.push(`Warning: unknown "codex.${key}" config key; ignoring it.`);
   }
 
   config.extraCwds = asStringArray(obj.extraCwds, 'extraCwds', warnings);
@@ -322,11 +316,17 @@ export async function loadConfig(
   const interval = validateIntervalSeconds(obj.watchIntervalSeconds);
   config.watchIntervalSeconds = interval.seconds;
   if (interval.warning) warnings.push(interval.warning);
-  config.outputAllFileName = asString(obj.outputAllFileName, config.outputAllFileName, 'outputAllFileName', warnings);
-  config.claude.outputAllFileName = asString(claude.outputAllFileName, config.claude.outputAllFileName, 'claude.outputAllFileName', warnings);
-  config.codex.outputAllFileName = asString(codex.outputAllFileName, config.codex.outputAllFileName, 'codex.outputAllFileName', warnings);
-  config.claude.outputSessionFilePrefix = asString(claude.outputSessionFilePrefix, config.claude.outputSessionFilePrefix, 'claude.outputSessionFilePrefix', warnings);
-  config.codex.outputSessionFilePrefix = asString(codex.outputSessionFilePrefix, config.codex.outputSessionFilePrefix, 'codex.outputSessionFilePrefix', warnings);
+  config.recentDays = asPositiveInteger(obj.recentDays, config.recentDays, 'recentDays', warnings);
+  if (obj.autoBackupGraceMinutes !== undefined) {
+    if (typeof obj.autoBackupGraceMinutes === 'number'
+      && Number.isSafeInteger(obj.autoBackupGraceMinutes)
+      && obj.autoBackupGraceMinutes >= 1
+      && obj.autoBackupGraceMinutes <= 60) {
+      config.autoBackupGraceMinutes = obj.autoBackupGraceMinutes;
+    } else {
+      errors.push('autoBackupGraceMinutes must be an integer from 1 through 60 (minutes).');
+    }
+  }
   // Subagent display (spec §5.2). The official key and its former name are read
   // separately — a value of `undefined` here means "not specified", which is
   // what the resolution rules are written in terms of.
@@ -340,37 +340,6 @@ export async function loadConfig(
   config.codex.includeDeveloperMessages = asBool(codex.includeDeveloperMessages, config.codex.includeDeveloperMessages, 'codex.includeDeveloperMessages', warnings);
   config.claude.extraLogDirs = asRootSpecArray(claude.extraLogDirs, 'claude.extraLogDirs', warnings);
   config.codex.extraLogDirs = asRootSpecArray(codex.extraLogDirs, 'codex.extraLogDirs', warnings);
-
-  // Fatal filename validation (§4.3).
-  const nameChecks: Array<[string, string]> = [
-    [config.outputAllFileName, 'outputAllFileName'],
-    [config.claude.outputAllFileName, 'claude.outputAllFileName'],
-    [config.codex.outputAllFileName, 'codex.outputAllFileName'],
-  ];
-  for (const [name, label] of nameChecks) {
-    const err = validateAggregateName(name, label);
-    if (err) errors.push(err);
-  }
-  const prefixChecks: Array<[string, string]> = [
-    [config.claude.outputSessionFilePrefix, 'claude.outputSessionFilePrefix'],
-    [config.codex.outputSessionFilePrefix, 'codex.outputSessionFilePrefix'],
-  ];
-  for (const [name, label] of prefixChecks) {
-    const err = validatePrefix(name, label);
-    if (err) errors.push(err);
-  }
-
-  // Aggregate-name collision (§4.4): 2+ of the 3 identical (win32 case-fold).
-  const norm = (s: string) => (process.platform === 'win32' ? s.toLowerCase() : s);
-  const names = [config.outputAllFileName, config.claude.outputAllFileName, config.codex.outputAllFileName];
-  const seen = new Map<string, number>();
-  for (const n of names) seen.set(norm(n), (seen.get(norm(n)) ?? 0) + 1);
-  for (const count of seen.values()) {
-    if (count >= 2) {
-      errors.push(`Two or more aggregate file names collide: [${names.join(', ')}]. Each of outputAllFileName / claude.outputAllFileName / codex.outputAllFileName must be distinct.`);
-      break;
-    }
-  }
 
   // Template (§4.5): the built-in default applies ONLY when the key is absent.
   // An explicit value is resolved; an explicit EMPTY value is a fatal error

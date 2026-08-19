@@ -4,6 +4,38 @@
 
 ## Version
 
+### 1.9.0
+#### 2026/08/20(Thu)
+- output file names are fixed: `ccxlog.md` / `cclog.md` / `cxlog.md`, their
+  `_archive.md` companions, and `cclog_<id>.md` / `cxlog_<id>.md` for
+  `--per-session`. The `outputAllFileName` and `outputSessionFilePrefix`
+  settings are removed; a config that still sets one stops with an error
+  instead of silently writing to the fixed name and leaving the renamed file
+  behind unread. Rename existing output to the fixed names, then remove the
+  keys. Use `--out` to choose the directory
+- do not trigger an automatic Markdown backup when only IDs belonging to the
+  latest 10 minutes disappear. `autoBackupGraceMinutes` accepts an integer from
+  1 through 60 and changes that minute-only grace period; invalid values are a
+  config error. This avoids backups caused while a live question/answer block
+  grows and receives a new content-derived ID. The invisible ID marker stores
+  Unix milliseconds so the rule is template-independent. Manual backups are unchanged
+- keep the everyday aggregate (`ccxlog.md`, `cclog.md`, or `cxlog.md`) small by
+  moving older blocks into a matching `_archive.md` file. `recentDays` defaults
+  to 8 local calendar days, retaining the same weekday from the previous week
+  while keeping active projects practical to open; it accepts any integer of
+  1 or greater. If every block fits, no archive file is kept
+- treat the recent and archive Markdown as one logical history for automatic
+  backup decisions. Moving a block across the date boundary is not a loss; a
+  backup is made only when an old `ccxlogid` disappears from both new files,
+  and then both old files are preserved together
+- record why an automatic backup was taken. Each
+  `backup_CCXLOG_md_auto/<stamp>/` folder now also holds a
+  `ccxlog-backup-reason.txt` naming the file backed up, the block count before
+  and after, every missing `ccxlogid` with the first line of its block, and the
+  ccxlog version that made the rewrite. A backup only ever appears because
+  blocks were about to be lost, and the folder alone could not say whether a
+  source log had expired or an upgrade had merely changed how blocks are formed
+
 ### 1.8.0
 #### 2026/08/09(Sun)
 - add `codex.includeSubagents` and `claude.includeSubagents` — one setting name

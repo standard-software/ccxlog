@@ -48,8 +48,9 @@ cd /path/to/your/project
 ccxlog
 ```
 
-This writes `CCXLOG/ccxlog.md` with every Q&A pair from every Claude Code and
-Codex session for that project, merged and sorted chronologically.
+This writes the most recent 8 local calendar days to `CCXLOG/ccxlog.md`, with
+older Q&A pairs in `CCXLOG/ccxlog_archive.md`. If every pair fits in the recent
+window, the archive file is not created. Both files remain chronological.
 
 To export a single source:
 
@@ -58,8 +59,9 @@ ccxlog -cc      # Claude Code only  -> CCXLOG/cclog.md
 ccxlog -cx      # Codex only        -> CCXLOG/cxlog.md
 ```
 
-The three aggregate files (`ccxlog.md`, `cclog.md`, `cxlog.md`) coexist in the
-output directory; each mode only touches its own file.
+The three aggregate families (`ccxlog.md`, `cclog.md`, `cxlog.md`, plus an
+`_archive.md` companion when needed) coexist in the output directory; each mode
+only touches its own family.
 
 ### Log locations and discovery
 
@@ -245,6 +247,15 @@ the original Markdown is not modified. This lets you recover content that had
 already been exported to `ccxlog.md` even after it disappears from the source
 JSONL logs.
 
+Beside the copies, each folder holds a `ccxlog-backup-reason.txt` naming what
+was about to be lost — the file, the block count before and after, and every
+missing `ccxlogid` with the first line of its block (the heading, so the date,
+source and session are readable at a glance) — plus the ccxlog version that
+made the rewrite. A run that backs up several files appends one section per
+file. This is what tells you whether a backup means a source log has expired
+(the blocks now exist only in this folder, and the sessions named in the record
+are the ones to check) or simply that an upgrade changed how blocks are formed.
+
 You can also create a backup manually at any time:
 
 ```bash
@@ -312,18 +323,15 @@ or `codex` namespace:
   ],
   "includeSubdirectories": true,
   "watchIntervalSeconds": 5,
-  "outputAllFileName": "ccxlog.md",
+  "recentDays": 8,
+  "autoBackupGraceMinutes": 10,
   "template": "templates/english.md",
 
   "claude": {
-    "outputAllFileName": "cclog.md",
-    "outputSessionFilePrefix": "cclog_",
     "extraLogDirs": [],
     "includeSubagents": true
   },
   "codex": {
-    "outputAllFileName": "cxlog.md",
-    "outputSessionFilePrefix": "cxlog_",
     "extraLogDirs": [],
     "includeDeveloperMessages": false,
     "includeSubagents": true
@@ -341,15 +349,18 @@ on Ubuntu/macOS (`/home/you/...`).
 | `extraCwds`               | Additional project directories whose logs (from either tool) should be merged into the output. |
 | `includeSubdirectories`   | If `true` (default), also collect logs from projects whose cwd is a *subdirectory* of the project ccxlog runs in (e.g. running in `~/work/app` also gathers `~/work/app/frontend`). Nested candidates are verified against each session's real cwd, so same-prefix siblings like `~/work/app-backup` are never included. Set `false` to match only the exact project path (plus `extraCwds` / `extraLogDirs`). |
 | `watchIntervalSeconds`    | How long `--watch` waits between cycles, in seconds. Integer, 1-86400, default `5`. An out-of-range or non-integer value warns once and falls back to 5. Ignored when `--watch` is not used. |
-| `outputAllFileName`       | Filename for the **merged** (`both`) aggregate output. Default `ccxlog.md`. The title inside the file is derived from the basename. |
+| `recentDays`              | Number of local calendar days kept in the everyday aggregate. Integer of 1 or greater, default `8` (today plus the same weekday from the previous week). Older blocks go to the matching `_archive.md`; no archive is kept when it would be empty. |
+| `autoBackupGraceMinutes`  | Recent-ID grace period for automatic Markdown backups, in minutes. Integer from `1` through `60`, default `10`. A disappearing block whose timestamp is inside this window does not trigger an automatic backup; this absorbs ID changes while a live response is still growing. Manual backups are unchanged. |
 | `template`                | Path to a Markdown template. Resolved against ccxlog's own `templates/` dir first, then your CCXLOG dir. |
+
+The generated `ccxlogid` HTML-comment marker carries the pair time as Unix
+milliseconds (`time:<number>`), so this decision does not depend on the selected
+template or timezone. Older markers without `time` remain readable.
 
 ### Per-source (`claude` / `codex`)
 
 | Field                     | Description                                                                 |
 |---------------------------|-----------------------------------------------------------------------------|
-| `outputAllFileName`       | Aggregate filename for `-cc` / `-cx` mode. Defaults `cclog.md` / `cxlog.md`. |
-| `outputSessionFilePrefix` | Prefix for per-session filenames (used with `--per-session`). Defaults `cclog_` / `cxlog_`, so files are `cclog_<id>.md` / `cxlog_<id>.md`. Empty string means no prefix. |
 | `extraLogDirs`            | Additional raw log directories to read verbatim (backup snapshots, log trees copied from another machine, ...). Entries are read without the cwd filter, and may point anywhere — including under `<out>` (e.g. `backup_jsonl/<stamp>/cc`). Each source ingests only files in its own format (claude skips Codex rollouts and vice versa; unrelated `.jsonl` is skipped by both, reported under `--verbose`). |
 | `includeSubagents`        | If `true` (**default**), render the conversations of subagents — the child AIs or threads a session delegates work to. Set `false` to keep only the main conversation. Each key controls its own source. See [Subagents](#subagents) below. |
 | `includeSidechain`        | *(claude only)* The supported former name of `claude.includeSubagents`; `sidechain` is Claude Code's historical term for the same records. It still works on its own. Setting **both** to *different* values is a fatal config error — ccxlog will not silently pick one. |
@@ -560,7 +571,8 @@ nothing has changed, the file's modification time is preserved as well.
   every existing `ccxlogid` (template changes, insertion of an earlier Q&A
   block, answer updates) produces no backup. When a backup is required it is
   taken **and verified** before the rewrite; if it cannot be verified, the
-  rewrite is aborted.
+  rewrite is aborted. Each backup folder also gets a
+  `ccxlog-backup-reason.txt` recording what was about to be lost.
 
 ## License
 

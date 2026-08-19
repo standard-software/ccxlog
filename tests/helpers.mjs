@@ -79,8 +79,8 @@ export function codexQA(projectPath, {
 }
 
 // Run the compiled CLI with a fake HOME so discovery only sees our fixtures.
-export function runCli(args, { home, cwd = ROOT } = {}) {
-  const env = { ...process.env };
+export function runCli(args, { home, cwd = ROOT, env: envOverrides = {} } = {}) {
+  const env = { ...process.env, NODE_ENV: 'test', CCXLOG_TEST_NOW: '2026-01-01T12:00:00', ...envOverrides };
   if (home) {
     env.HOME = home;
     env.USERPROFILE = home;      // os.homedir() reads USERPROFILE on Windows
@@ -98,7 +98,7 @@ export function sha256(buf) {
 // Count formal ccxlogid markers in a rendered file.
 export function countPairs(filePath) {
   const text = fs.readFileSync(filePath, 'utf-8');
-  return (text.match(/<!-- ccxlogid:[0-9a-f]{24} -->/g) ?? []).length;
+  return (text.match(/<!-- ccxlogid:[0-9a-f]{24}(?: time:(?:\d+|unknown))? -->/g) ?? []).length;
 }
 
 // ---------------------------------------------------------------------------

@@ -30,8 +30,6 @@ export const codexAdapter: SourceAdapter = {
     return roots;
   },
 
-  outputAllFileName(cfg: CcxlogConfig): string { return cfg.codex.outputAllFileName; },
-  sessionFilePrefix(cfg: CcxlogConfig): string { return cfg.codex.outputSessionFilePrefix; },
   // The cwd prefilter that runs before any full parse (see cwdScanner.ts). The
   // only files it may exclude are those that definitely do not belong to this
   // project; an unknown cwd or a failed scan falls back to normal analysis.

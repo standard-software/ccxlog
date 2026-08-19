@@ -40,30 +40,17 @@ test('-cx selects Codex logs', t => {
   assert.equal(exists(path.join(ws.out, 'ccxlog.md')), false);
 });
 
-test('outputAllFileName renames only the both-mode aggregate', t => {
+test('a config that renames an output is a fatal error, and nothing is written', t => {
   const ws = setup(t, { outputAllFileName: 'merged.md' });
   const r = run([ws.project, '--out', ws.out], { home: ws.home });
-  assert.equal(r.status, 0, r.stderr);
-  assert.equal(exists(path.join(ws.out, 'merged.md')), true);
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /outputAllFileName is no longer supported/);
+  // Fatal means fatal: neither the requested name nor the fixed one appears.
+  assert.equal(exists(path.join(ws.out, 'merged.md')), false);
   assert.equal(exists(path.join(ws.out, 'ccxlog.md')), false);
-  assert.match(r.stdout, /Mode: aggregate \(merged\.md\)/);
 });
 
-test('claude.outputAllFileName / codex.outputAllFileName rename only their own mode', t => {
-  const ws = workspace(t);
-  writeJsonl(path.join(ws.ccLogs, 'a.jsonl'), claudeQA(ws.project, { q: 'CC question' }));
-  writeJsonl(path.join(ws.cxLogs, 'r.jsonl'), codexQA(ws.project, { q: 'CX question' }));
-  writeConfig(ws.out, {
-    claude: { extraLogDirs: [ws.ccLogs], outputAllFileName: 'cc-custom.md' },
-    codex: { extraLogDirs: [ws.cxLogs], outputAllFileName: 'cx-custom.md' },
-  });
-  assert.equal(run([ws.project, '--out', ws.out, '-cc'], { home: ws.home }).status, 0);
-  assert.equal(run([ws.project, '--out', ws.out, '-cx'], { home: ws.home }).status, 0);
-  assert.equal(exists(path.join(ws.out, 'cc-custom.md')), true);
-  assert.equal(exists(path.join(ws.out, 'cx-custom.md')), true);
-  assert.equal(exists(path.join(ws.out, 'cclog.md')), false);
-  assert.equal(exists(path.join(ws.out, 'cxlog.md')), false);
-});
+
 
 test('%Model% and %Tokens% render per source (§6.4/§7.2)', t => {
   const ws = setup(t);

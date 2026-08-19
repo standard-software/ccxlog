@@ -120,7 +120,7 @@ const cancelSession = (withCancel) => [
   A('a2', 'u2', T('21'), 'RETYPED-answer'),
 ];
 
-const idsOf = (text) => (text.match(/<!-- ccxlogid:[0-9a-f]{24} -->/g) ?? []);
+const idsOf = (text) => (text.match(/<!-- ccxlogid:[0-9a-f]{24}(?: time:(?:\d+|unknown))? -->/g) ?? []);
 
 test('R1-6/R4-4: aggregate includes cancelled questions and migration rewrites without a backup', t => {
   const ws = workspace(t);

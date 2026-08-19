@@ -97,8 +97,6 @@ export interface SourceAdapter {
   // (it widens its own cwd filter instead). Only called when
   // cfg.includeSubdirectories is true.
   subdirRoots?(projectPath: string, realProjectPath: string, cfg: CcxlogConfig): Promise<RootRef[]>;
-  outputAllFileName(cfg: CcxlogConfig): string;
-  sessionFilePrefix(cfg: CcxlogConfig): string;
   // Optional: a lightweight prefilter run before any session is fully parsed.
   // The only files it may exclude are those that CANNOT belong to the target
   // project; a file whose belonging is unknown must be kept and passed on to

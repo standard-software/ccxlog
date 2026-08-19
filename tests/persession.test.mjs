@@ -14,19 +14,20 @@ function claudeOrphan() {
   return [{ type: 'assistant', uuid: 'a', parentUuid: null, timestamp: '2026-05-27T11:00:00.000Z', message: { role: 'assistant', content: [{ type: 'text', text: 'orphan' }] } }];
 }
 
-test('session prefixes are independently configurable', t => {
+test('per-session files always use the fixed cclog_ / cxlog_ prefixes', t => {
   const ws = workspace(t);
   writeJsonl(path.join(ws.ccLogs, 'sess.jsonl'), claudeQA(ws.project));
   writeJsonl(path.join(ws.cxLogs, 'roll.jsonl'), codexQA(ws.project, { sessionId: 'xid' }));
   writeConfig(ws.out, {
-    claude: { extraLogDirs: [ws.ccLogs], outputSessionFilePrefix: 'CC__' },
-    codex: { extraLogDirs: [ws.cxLogs], outputSessionFilePrefix: 'CX__' },
+    claude: { extraLogDirs: [ws.ccLogs] },
+    codex: { extraLogDirs: [ws.cxLogs] },
   });
   const r = run([ws.project, '--out', ws.out, '--per-session'], { home: ws.home });
   assert.equal(r.status, 0, r.stderr);
-  assert.equal(exists(path.join(ws.out, 'CC__sess.md')), true);
-  assert.equal(exists(path.join(ws.out, 'CX__xid.md')), true);
+  assert.equal(exists(path.join(ws.out, 'cclog_sess.md')), true);
+  assert.equal(exists(path.join(ws.out, 'cxlog_xid.md')), true);
 });
+
 
 test('the session file carries a strict ownership marker', t => {
   const ws = workspace(t);

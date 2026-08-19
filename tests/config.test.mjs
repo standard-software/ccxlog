@@ -24,10 +24,25 @@ test('config: no file -> all defaults, no errors', async () => {
   try {
     const { config, errors } = await loadConfig(dir, dir);
     assert.equal(errors.length, 0);
-    assert.equal(config.outputAllFileName, 'ccxlog.md');
-    assert.equal(config.claude.outputAllFileName, 'cclog.md');
-    assert.equal(config.codex.outputAllFileName, 'cxlog.md');
+    assert.equal(config.recentDays, 8);
+    assert.equal(config.autoBackupGraceMinutes, 10);
   } finally { rmrf(dir); }
+});
+
+test('config: autoBackupGraceMinutes accepts only integer minutes from 1 through 60', async () => {
+  for (const value of [1, 10, 60]) {
+    await withConfig({ autoBackupGraceMinutes: value }, async (dir) => {
+      const { config, errors } = await loadConfig(dir, dir);
+      assert.equal(errors.length, 0);
+      assert.equal(config.autoBackupGraceMinutes, value);
+    });
+  }
+  for (const value of [0, -1, 1.5, 61, '10', null]) {
+    await withConfig({ autoBackupGraceMinutes: value }, async (dir) => {
+      const { errors } = await loadConfig(dir, dir);
+      assert.ok(errors.some(e => /autoBackupGraceMinutes.*integer from 1 through 60.*minutes/i.test(e)));
+    });
+  }
 });
 
 test('config: broken JSON is a fatal error, not a silent default', async () => {
@@ -44,34 +59,55 @@ test('config: non-object root is fatal', async () => {
   });
 });
 
-test('config: reserved name with multiple extensions is rejected', async () => {
-  await withConfig({ outputAllFileName: 'CON.a.b' }, async (dir) => {
+
+
+
+
+
+// Output names are fixed since v2 of the config surface (shipped in 1.9.0).
+// The old keys must FAIL the run rather than vanish into the unknown-key
+// warning: silently ignoring them would redirect output to the fixed name and
+// leave the user's renamed file behind, unread — exactly the quiet-loss shape
+// the removal was meant to end.
+test('config: every removed output-name key is a fatal error naming the fixed name', async () => {
+  const cases = [
+    [{ outputAllFileName: 'log.md' }, /outputAllFileName is no longer supported.*ccxlog\.md/i],
+    [{ claude: { outputAllFileName: 'c.md' } }, /claude\.outputAllFileName is no longer supported.*cclog\.md/i],
+    [{ codex: { outputAllFileName: 'x.md' } }, /codex\.outputAllFileName is no longer supported.*cxlog\.md/i],
+    [{ claude: { outputSessionFilePrefix: 'p_' } }, /claude\.outputSessionFilePrefix is no longer supported.*cclog_/i],
+    [{ codex: { outputSessionFilePrefix: 'q_' } }, /codex\.outputSessionFilePrefix is no longer supported.*cxlog_/i],
+  ];
+  for (const [cfg, re] of cases) {
+    await withConfig(cfg, async (dir) => {
+      const { errors } = await loadConfig(dir, dir);
+      assert.ok(errors.some(e => re.test(e)), `expected a fatal error for ${JSON.stringify(cfg)}, got: ${errors.join(' | ')}`);
+    });
+  }
+});
+
+test('config: a removed key is fatal even when set to its old default', async () => {
+  // The value being harmless does not make the key harmless: accepting the
+  // default spelling would keep dead configuration alive in the wild.
+  await withConfig({ outputAllFileName: 'ccxlog.md' }, async (dir) => {
     const { errors } = await loadConfig(dir, dir);
-    assert.ok(errors.some(e => /reserved name/i.test(e)));
+    assert.ok(errors.some(e => /outputAllFileName is no longer supported/i.test(e)));
   });
 });
 
-test('config: DEL / C1 control chars in a name are rejected', async () => {
-  await withConfig({ outputAllFileName: 'ab.md' }, async (dir) => {
-    const { errors } = await loadConfig(dir, dir);
-    assert.ok(errors.some(e => /control characters/i.test(e)));
+test('config: recentDays accepts integers >= 1 and otherwise warns and uses 8', async () => {
+  await withConfig({ recentDays: 31 }, async (dir) => {
+    const { config, warnings } = await loadConfig(dir, dir);
+    assert.equal(config.recentDays, 31);
+    assert.equal(warnings.length, 0);
   });
-});
-
-test('config: two identical aggregate names collide (code 1)', async () => {
-  await withConfig({ outputAllFileName: 'same.md', claude: { outputAllFileName: 'same.md' } }, async (dir) => {
-    const { errors } = await loadConfig(dir, dir);
-    assert.ok(errors.some(e => /collide/i.test(e)));
-  });
-});
-
-test('config: non-string filename warns and falls back (not silent)', async () => {
-  await withConfig({ outputAllFileName: 123 }, async (dir) => {
-    const { config, warnings, errors } = await loadConfig(dir, dir);
-    assert.equal(errors.length, 0);
-    assert.ok(warnings.some(w => /outputAllFileName must be a string/i.test(w)));
-    assert.equal(config.outputAllFileName, 'ccxlog.md');
-  });
+  for (const value of [0, -1, 1.5, '15', null]) {
+    await withConfig({ recentDays: value }, async (dir) => {
+      const { config, warnings, errors } = await loadConfig(dir, dir);
+      assert.equal(errors.length, 0);
+      assert.equal(config.recentDays, 8);
+      assert.ok(warnings.some(w => /recentDays must be an integer of 1 or greater/i.test(w)));
+    });
+  }
 });
 
 test('config: explicit empty template is a fatal error', async () => {
@@ -88,20 +124,6 @@ test('config: missing explicit template file is fatal (no silent fallback)', asy
   });
 });
 
-test('config: path-separator, trailing-dot and empty aggregate names are fatal', async () => {
-  const cases = [
-    ['sub/dir.md', /path separators/i],
-    ['a\\b.md', /path separators/i],
-    ['trailing.md.', /space or period/i],
-    ['', /must not be empty/i],
-  ];
-  for (const [name, re] of cases) {
-    await withConfig({ outputAllFileName: name }, async (dir) => {
-      const { errors } = await loadConfig(dir, dir);
-      assert.ok(errors.some(e => re.test(e)), `expected a fatal error for ${JSON.stringify(name)}`);
-    });
-  }
-});
 
 test('config: boolean type mismatches warn and fall back to defaults', async () => {
   await withConfig({ claude: { includeSidechain: 'yes' }, codex: { includeDeveloperMessages: 1 } }, async (dir) => {

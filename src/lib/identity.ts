@@ -116,7 +116,7 @@ export function safeSessionId(sessionId: string, sourceFileRelativeId: string): 
 
 export type BlockMethod = 'ccxlogid' | 'none';
 
-const CCXLOG_ID_MARKER_RE = /^<!-- (ccxlogid:[0-9a-f]{24}) -->$/;
+const CCXLOG_ID_MARKER_RE = /^<!-- (ccxlogid:[0-9a-f]{24})(?: time:(\d+|unknown))? -->$/;
 const CCXLOG_ID_LOOSE_RE = /^<!-- ccxlogid:/;
 
 export interface CcxlogIdParse {
@@ -171,6 +171,60 @@ export function idsByMethod(content: string, method: BlockMethod): string[] {
   return [];
 }
 
+// The ids present in the old content and missing from the new one, in the order
+// the old content lists them, each reported once. Empty for method 'none' — not
+// because nothing is being lost there, but because an undecidable comparison
+// cannot name what it loses; isDestructive treats that case separately.
+function blockTimes(content: string): Map<string, number | null> {
+  const result = new Map<string, number | null>();
+  const lines = content.split('\n');
+  let currentId: string | null = null;
+  for (const line of lines) {
+    const id = CCXLOG_ID_MARKER_RE.exec(line);
+    if (id) {
+      currentId = id[1];
+      result.set(currentId, id[2] && id[2] !== 'unknown' ? Number(id[2]) : null);
+      continue;
+    }
+    if (!currentId) continue;
+    // Backward compatibility for Markdown generated before the time field was
+    // added to the formal marker. A custom old template without DateTime is
+    // indeterminate and remains protected by the conservative backup path.
+    const legacy = /^# (\d{4})\/(\d{2})\/(\d{2}) \w{3} (\d{2}):(\d{2}):(\d{2})(?:\s|$)/.exec(line);
+    if (legacy && result.get(currentId) === null) {
+      result.set(currentId, new Date(
+        Number(legacy[1]), Number(legacy[2]) - 1, Number(legacy[3]),
+        Number(legacy[4]), Number(legacy[5]), Number(legacy[6]),
+      ).getTime());
+    }
+  }
+  return result;
+}
+
+export function lostIds(
+  oldContent: string,
+  newContent: string,
+  method: BlockMethod,
+  ignoreSinceMs?: number,
+  ignoreThroughMs?: number,
+): string[] {
+  if (method === 'none') return [];
+  const newIds = new Set(idsByMethod(newContent, method));
+  const cutoff = ignoreSinceMs ?? null;
+  const times = cutoff === null ? null : blockTimes(oldContent);
+  const seen = new Set<string>();
+  const lost: string[] = [];
+  for (const id of idsByMethod(oldContent, method)) {
+    if (newIds.has(id) || seen.has(id)) continue;
+    seen.add(id);
+    const timestamp = times?.get(id);
+    if (timestamp !== undefined && timestamp !== null && cutoff !== null
+      && timestamp >= cutoff && (ignoreThroughMs === undefined || timestamp <= ignoreThroughMs)) continue;
+    lost.push(id);
+  }
+  return lost;
+}
+
 // A destructive rewrite = at least one block id present in the old content is
 // missing from the new content. That is the ONLY trigger for an automatic backup
 // (v1.4.0 R2). Method 'none' (no valid id in the old content, malformed ids,
@@ -178,11 +232,53 @@ export function idsByMethod(content: string, method: BlockMethod): string[] {
 // treated as destructive — the safe direction — and a backup is taken. As long
 // as every id survives, replacing body text, inserting in the middle,
 // reordering, and changing the template all count as non-destructive.
-export function isDestructive(oldContent: string, newContent: string, method: BlockMethod): boolean {
+//
+// Built on lostIds rather than repeating the comparison, so the backup decision
+// and the reason recorded beside the backup (backup.ts) can never disagree —
+// "backed up but nothing listed as lost" would send a user hunting for a loss
+// that the two implementations merely described differently.
+export function isDestructive(
+  oldContent: string,
+  newContent: string,
+  method: BlockMethod,
+  ignoreSinceMs?: number,
+  ignoreThroughMs?: number,
+): boolean {
   if (method === 'none') return true; // undecidable -> back up, the safe direction
-  const newIds = new Set(idsByMethod(newContent, method));
-  for (const id of idsByMethod(oldContent, method)) {
-    if (!newIds.has(id)) return true;
+  return lostIds(oldContent, newContent, method, ignoreSinceMs, ignoreThroughMs).length > 0;
+}
+
+// The first non-empty line after each wanted id's marker, which is what makes a
+// lost block recognisable at a glance (the heading a template renders: date,
+// source, session). Nothing is assumed about that line's shape — templates are
+// user-editable — so whatever follows the marker is what gets reported.
+//
+// One pass over the content for all ids together: the caller may ask about
+// hundreds of blocks in a file of tens of megabytes.
+export function blockLabels(content: string, ids: string[]): Map<string, string> {
+  const wanted = new Set(ids);
+  const labels = new Map<string, string>();
+  if (wanted.size === 0) return labels;
+  const lines = content.split('\n');
+  for (let i = 0; i < lines.length && labels.size < wanted.size; i++) {
+    const m = CCXLOG_ID_MARKER_RE.exec(lines[i]);
+    if (!m || !wanted.has(m[1]) || labels.has(m[1])) continue;
+    let label = '';
+    for (let j = i + 1; j < lines.length; j++) {
+      const candidate = lines[j].trim();
+      if (candidate === '') continue;
+      if (CCXLOG_ID_MARKER_RE.test(lines[j])) break; // next block starts: this one has no body
+      label = candidate;
+      break;
+    }
+    labels.set(m[1], truncateChars(label, 160));
   }
-  return false;
+  return labels;
+}
+
+// Cut by code point, never mid character: the label is copied verbatim from a
+// conversation and routinely holds Japanese, emoji and other astral characters.
+function truncateChars(s: string, max: number): string {
+  const chars = Array.from(s);
+  return chars.length <= max ? s : `${chars.slice(0, max).join('')}...`;
 }

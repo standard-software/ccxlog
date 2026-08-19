@@ -111,8 +111,6 @@ export const claudeAdapter: SourceAdapter = {
     return roots;
   },
 
-  outputAllFileName(cfg: CcxlogConfig): string { return cfg.claude.outputAllFileName; },
-  sessionFilePrefix(cfg: CcxlogConfig): string { return cfg.claude.outputSessionFilePrefix; },
 
   async readSession(file: DiscoveredFile, cfg: CcxlogConfig): Promise<SessionData> {
     const r = await readJsonl(file.filePath);

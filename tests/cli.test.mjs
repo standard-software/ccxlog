@@ -231,7 +231,7 @@ test('a duplicate extra-root alias key mapping to two dirs is fatal (§5.5)', ()
   } finally { s.cleanup(); }
 });
 
-test('aggregate name collision is rejected before writing (code 1)', () => {
+test('removed output-name keys are rejected before writing (code 1)', () => {
   const s = scaffold();
   try {
     fs.mkdirSync(s.out, { recursive: true });
@@ -239,6 +239,7 @@ test('aggregate name collision is rejected before writing (code 1)', () => {
       JSON.stringify({ outputAllFileName: 'same.md', claude: { outputAllFileName: 'same.md' } }), 'utf-8');
     const r = runCli([s.project], { home: s.home });
     assert.equal(r.code, 1);
+    assert.match(r.stderr, /no longer supported/);
     assert.ok(!fs.existsSync(path.join(s.out, 'same.md')));
   } finally { s.cleanup(); }
 });

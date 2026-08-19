@@ -48,8 +48,9 @@ cd /path/to/your/project
 ccxlog
 ```
 
-これで `CCXLOG/ccxlog.md` に、そのプロジェクトの全 Claude Code・全 Codex セッションの
-Q&A ペアが、統合・時系列ソートされて書き出されます。
+これで直近8ローカル暦日のQ&Aペアが `CCXLOG/ccxlog.md` に、それ以前が
+`CCXLOG/ccxlog_archive.md` に、統合・時系列ソートされて書き出されます。
+全ペアが直近期間に収まる場合、アーカイブファイルは作成されません。
 
 片方のソースだけを出力するには:
 
@@ -58,8 +59,8 @@ ccxlog -cc      # Claude Code のみ  -> CCXLOG/cclog.md
 ccxlog -cx      # Codex のみ        -> CCXLOG/cxlog.md
 ```
 
-3つの集約ファイル（`ccxlog.md` / `cclog.md` / `cxlog.md`）は出力ディレクトリに共存し、
-各モードは自分のファイルだけを更新します。
+3つの集約ファイル群（`ccxlog.md` / `cclog.md` / `cxlog.md` と、必要時の
+`_archive.md`）は出力ディレクトリに共存し、各モードは自分のファイル群だけを更新します。
 
 ### ログの保存場所と検出
 
@@ -232,6 +233,15 @@ CCXLOG/backup_CCXLOG_md_auto/<yyyy-mm-dd_hh-mm-ss>_<hostname>/
 書き換えません。これにより、生 JSONL ログから過去のやり取りが消えたあとでも、
 それまで `ccxlog.md` に出力されていた内容をバックアップから確認できます。
 
+各フォルダには、コピーと並べて `ccxlog-backup-reason.txt` が保存されます。何が
+失われようとしたのか——対象ファイル、ブロック数の増減、消える `ccxlogid` すべてと
+その先頭行（見出し行なので日時・ソース・セッションがそのまま読めます）、および
+書き換えを行った ccxlog のバージョン——が記録されます。1回の実行で複数ファイルを
+バックアップした場合は、ファイルごとに1セクションずつ追記されます。これを読めば、
+バックアップの理由が「ソースログが期限切れで消えた（＝その内容はもうこのフォルダに
+しか無い。記録されたセッションを確認すべき）」のか「アップグレードでブロックの
+作られ方が変わっただけ」なのかが、その場で判別できます。
+
 任意のタイミングで手動バックアップを取ることもできます。
 
 ```bash
@@ -300,18 +310,15 @@ Markdown の（再）生成は**行いません**。
   ],
   "includeSubdirectories": true,
   "watchIntervalSeconds": 5,
-  "outputAllFileName": "ccxlog.md",
+  "recentDays": 8,
+  "autoBackupGraceMinutes": 10,
   "template": "templates/japanese.md",
 
   "claude": {
-    "outputAllFileName": "cclog.md",
-    "outputSessionFilePrefix": "cclog_",
     "extraLogDirs": [],
     "includeSubagents": true
   },
   "codex": {
-    "outputAllFileName": "cxlog.md",
-    "outputSessionFilePrefix": "cxlog_",
     "extraLogDirs": [],
     "includeDeveloperMessages": false,
     "includeSubagents": true
@@ -330,15 +337,18 @@ Ubuntu/macOS ではスラッシュ区切りのパス（`/home/you/...`）を使�
 | `extraCwds`               | 出力に統合したい追加のプロジェクトディレクトリ（どちらのツールのログも対象）。 |
 | `includeSubdirectories`   | `true`（既定）なら、ccxlog を実行したプロジェクトの *サブディレクトリ* を cwd とするプロジェクトのログも収集する（例: `~/work/app` で実行すると `~/work/app/frontend` も収集）。候補は各セッションの実 cwd と照合されるので、同接頭辞の兄弟（`~/work/app-backup`）は決して混入しない。`false` にすると、正確なプロジェクトパス（＋ `extraCwds` / `extraLogDirs`）だけに一致。 |
 | `watchIntervalSeconds`    | `--watch` の待機秒数。1〜86400 の整数、既定 `5`。範囲外・非整数は警告1行を出して 5 にフォールバックする。`--watch` を使わない実行では使われない。 |
-| `outputAllFileName`       | **統合**（`both`）集約出力のファイル名。既定 `ccxlog.md`。ファイル内のタイトルはベース名から導かれる。 |
+| `recentDays`              | 日常用集約ファイルに残すローカル暦日数。1以上の整数、既定 `8`（今日から前週の同じ曜日まで）。それ以前は対応する `_archive.md` へ移し、空になる場合はアーカイブを残さない。 |
+| `autoBackupGraceMinutes`  | Markdown自動バックアップで、直近IDの消失を無視する猶予時間（分）。`1`〜`60`の整数、既定 `10`。返信生成中にブロックが成長してIDが変わる場合の不要な自動バックアップを防ぐ。手動バックアップには影響しない。 |
 | `template`                | Markdown テンプレートのパス。まず ccxlog 自身の `templates/` ディレクトリ、次に CCXLOG ディレクトリの順に解決。 |
+
+生成される `ccxlogid` のHTMLコメントには、ペアの時刻をUnixミリ秒の
+`time:<数値>` として保持する。このため判定はテンプレートやタイムゾーンに依存しない。
+`time` のない従来マーカーも引き続き読み取れる。
 
 ### ソース別（`claude` / `codex`）
 
 | フィールド                | 説明                                                                        |
 |---------------------------|-----------------------------------------------------------------------------|
-| `outputAllFileName`       | `-cc` / `-cx` モードの集約ファイル名。既定 `cclog.md` / `cxlog.md`。 |
-| `outputSessionFilePrefix` | セッションごとのファイル名の接頭辞（`--per-session` で使用）。既定 `cclog_` / `cxlog_` で、`cclog_<id>.md` / `cxlog_<id>.md` になる。空文字なら接頭辞なし。 |
 | `extraLogDirs`            | そのまま読み取る追加の生ログディレクトリ（バックアップのスナップショット、別マシンから持ってきたログツリーなど）。cwd フィルタなしで読み、`<out>` 配下（例: `backup_jsonl/<日時>/cc`）を含めどこでも指定できる。各ソースは自分の形式のファイルだけを取り込む（claude は Codex rollout を、codex は Claude セッションログを読み飛ばし、無関係な `.jsonl` は両方が読み飛ばす。`--verbose` で表示）。 |
 | `includeSubagents`        | `true`（**既定**）なら、サブエージェント（セッションが作業を委任した子 AI・子スレッド）の会話も描画する。`false` にすると本体の会話だけを残す。キーはそれぞれ自分のソースだけを制御する。下の [サブエージェント](#サブエージェント) を参照。 |
 | `includeSidechain`        | *(claude のみ)* `claude.includeSubagents` のサポート対象の旧名。`sidechain` は同じ記録に対する Claude Code の歴史的な用語で、この設定だけを書いていた場合は今までどおり動作する。**両方**に**異なる**値を書いた場合は致命的な設定エラーになる（どちらかを黙って優先することはしない）。 |
@@ -535,6 +545,8 @@ ccxlog は、生成結果が変わる場合にだけ出力ファイルを更新�
   すべて保たれる書き換え（テンプレート変更、過去の時点へのQ&Aの挿入、回答の
   差し替えなど）ではバックアップを作成しません。バックアップが必要な場合は
   書き換え前に取得して**検証**し、検証できなければ上書きを中止します。
+  バックアップフォルダには、何が失われようとしたのかを記録した
+  `ccxlog-backup-reason.txt` も保存されます。
 
 ## License
 

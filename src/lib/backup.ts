@@ -3,7 +3,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { sha256HexBytes } from './pathUtils.js';
 import { decodeSid64 } from './identity.js';
-import type { CcxlogConfig } from './config.js';
+import { ALL_AGGREGATE_FILE_NAMES, SESSION_FILE_PREFIX } from './outputNames.js';
 import type { Source } from './types.js';
 
 export const BACKUP_JSONL_DIR = 'backup_jsonl';
@@ -13,6 +13,24 @@ export const BACKUP_MD_DIR = 'backup_CCXLOG_md';
 // that "something new appeared in _auto = a signal that pairs were about to
 // disappear" is not buried in the pile of manual backups.
 export const BACKUP_MD_AUTO_DIR = 'backup_CCXLOG_md_auto';
+
+// Written beside the copies inside an automatic backup folder. An automatic
+// backup only ever appears because something was about to be lost, and the
+// folder alone says nothing about WHAT or WHY — answering that used to mean
+// diffing the copy against the live file by hand and hunting for the session
+// whose log had gone. This file records it at the moment the backup is taken,
+// which is the only moment the old content is still available.
+export const BACKUP_REASON_FILE = 'ccxlog-backup-reason.txt';
+
+export type BackupReason =
+  // A rewrite that drops blocks: exactly which ids, and how they read.
+  | { kind: 'ids-lost'; oldCount: number; newCount: number; lost: Array<{ id: string; label: string }> }
+  // The two sides could not be compared, so the backup was taken on the safe
+  // side; `detail` says which side could not be read and why.
+  | { kind: 'undecidable'; oldCount: number; newCount: number; detail: string }
+  // A per-session output file about to be removed (equivalent to losing every
+  // block it holds).
+  | { kind: 'file-deleted' };
 
 export function backupHostName(): string {
   let raw = '';
@@ -26,6 +44,99 @@ export function backupFolderName(d: Date): string {
   const stamp = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}_`
     + `${p(d.getHours())}-${p(d.getMinutes())}-${p(d.getSeconds())}`;
   return `${stamp}_${backupHostName()}`;
+}
+
+function timestampText(d: Date): string {
+  const p = (n: number) => String(n).padStart(2, '0');
+  const off = -d.getTimezoneOffset();
+  const sign = off < 0 ? '-' : '+';
+  const abs = Math.abs(off);
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} `
+    + `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())} `
+    + `${sign}${p(Math.floor(abs / 60))}:${p(abs % 60)}`;
+}
+
+const REASON_HEADER = [
+  'ccxlog automatic backup',
+  '=======================',
+  '',
+  'The copies in this folder are the versions from BEFORE a run that was about',
+  'to remove conversation blocks from them. ccxlog takes this backup by itself,',
+  'so a folder here always means something was about to be lost.',
+  '',
+  'A block disappears when the source JSONL it was rendered from can no longer',
+  'be read - deleted by the logging tool\'s own retention, a log directory that',
+  'is not mounted at the moment, a moved project path - or when an upgrade to',
+  'ccxlog changes how blocks are formed. The first kind is worth acting on: the',
+  'content below now exists only in this folder.',
+  '',
+  '',
+].join('\n');
+
+// The lost-block list is capped: a first run after an upgrade can reshape
+// hundreds of blocks at once, and a reason file longer than the backup it
+// explains helps nobody. The count above the list is never capped, so a
+// truncated list still reports the true scale.
+const MAX_LISTED_BLOCKS = 200;
+
+export function renderBackupReason(
+  filePath: string,
+  reason: BackupReason,
+  version: string,
+  now: Date,
+): string {
+  const lines = [
+    '----------------------------------------------------------------------',
+    `File           : ${filePath}`,
+    `Backed up at   : ${timestampText(now)}`,
+    `ccxlog version : ${version}`,
+  ];
+  if (reason.kind === 'file-deleted') {
+    lines.push(
+      'Reason         : the output file itself is being removed, because the',
+      '                 session it belongs to no longer produces any block.',
+    );
+  } else if (reason.kind === 'undecidable') {
+    lines.push(
+      `Reason         : the old and new content could not be compared, so the`,
+      `                 backup was taken on the safe side - ${reason.detail}.`,
+      `Blocks         : ${reason.oldCount} before -> ${reason.newCount} after`,
+    );
+  } else {
+    lines.push(
+      `Reason         : ${reason.lost.length} block(s) present before the rewrite are missing`,
+      '                 from the new content.',
+      `Blocks         : ${reason.oldCount} before -> ${reason.newCount} after`,
+      '',
+      'Lost blocks (ccxlogid, then the first line of the block):',
+    );
+    for (const b of reason.lost.slice(0, MAX_LISTED_BLOCKS)) {
+      lines.push(`  ${b.id}`, `    ${b.label || '(no content after the marker)'}`);
+    }
+    if (reason.lost.length > MAX_LISTED_BLOCKS) {
+      lines.push(`  ... and ${reason.lost.length - MAX_LISTED_BLOCKS} more (see the backed up file itself)`);
+    }
+  }
+  lines.push('', '');
+  return lines.join('\n');
+}
+
+// Append one section per backed-up file, writing the shared header the first
+// time. Best effort by design: the reason is an explanation of a backup that
+// has already been taken and verified, so failing to record it must never turn
+// a successful backup into a failed run.
+export async function appendBackupReason(
+  backupDir: string,
+  filePath: string,
+  reason: BackupReason,
+  version: string,
+  now: Date,
+): Promise<void> {
+  try {
+    const dest = path.join(backupDir, BACKUP_REASON_FILE);
+    const head = (await exists(dest)) ? '' : REASON_HEADER;
+    await fs.appendFile(dest, head + renderBackupReason(filePath, reason, version, now), 'utf-8');
+  } catch { /* explanation only — never fail the run over it */ }
 }
 
 export interface JsonlBackupItem {
@@ -138,7 +249,7 @@ export async function parseSessionMarker(filePath: string): Promise<SessionMarke
 }
 
 // Which exported .md files in outDir --backup-md should copy (§9.4).
-export async function listExportedMdFiles(outDir: string, cfg: CcxlogConfig): Promise<string[]> {
+export async function listExportedMdFiles(outDir: string): Promise<string[]> {
   let entries: string[];
   try {
     entries = await fs.readdir(outDir);
@@ -146,8 +257,8 @@ export async function listExportedMdFiles(outDir: string, cfg: CcxlogConfig): Pr
     if ((e as NodeJS.ErrnoException).code === 'ENOENT') return [];
     throw e;
   }
-  const aggNames = new Set([cfg.outputAllFileName, cfg.claude.outputAllFileName, cfg.codex.outputAllFileName]);
-  const prefixes = [cfg.claude.outputSessionFilePrefix, cfg.codex.outputSessionFilePrefix].filter(p => p !== '');
+  const aggNames = new Set(ALL_AGGREGATE_FILE_NAMES);
+  const prefixes = Object.values(SESSION_FILE_PREFIX);
   const picked = new Set<string>();
   for (const name of entries) {
     if (!name.endsWith('.md')) continue;

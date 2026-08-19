@@ -17,9 +17,8 @@ test('--help / -h parse to a help request and the binary prints usage (exit 0)',
   const r = runCli(['--help']);
   assert.equal(r.code, 0, r.stderr);
   assert.match(r.stdout, /Usage:/);
-  assert.match(r.stdout, /outputAllFileName\s+merged output \(default: ccxlog\.md\)/);
-  assert.match(r.stdout, /claude\.outputAllFileName\s+-cc output\s+\(default: cclog\.md\)/);
-  assert.match(r.stdout, /codex\.outputAllFileName\s+-cx output\s+\(default: cxlog\.md\)/);
+  assert.match(r.stdout, /Output file names are fixed: ccxlog\.md \/ cclog\.md \/ cxlog\.md/);
+  assert.match(r.stdout, /recentDays\s+local calendar days kept in the main aggregate \(default: 8\)/);
   assert.match(r.stdout, /<out>\/ccxlog\.config\.json/);
 });
 
