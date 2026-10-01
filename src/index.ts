@@ -29,6 +29,7 @@ import {
   type BackupNote,
 } from './lib/markdownWriter.js';
 import { archiveNow, splitRecentPairs } from './lib/recentArchive.js';
+import { isTaskNotificationOnly } from './lib/taskNotification.js';
 import { AGGREGATE_FILE_NAME, ARCHIVE_FILE_NAME, SESSION_FILE_PREFIX } from './lib/outputNames.js';
 import {
   backupFolderName,
@@ -678,7 +679,17 @@ async function writeAggregate(
 ): Promise<RunOutcome> {
   const backupNowMs = archiveNow().getTime();
   const backupIgnoreSinceMs = backupNowMs - config.autoBackupGraceMinutes * 60_000;
-  const sorted = [...allPairs].sort(compareUnifiedPairs);
+  // Harness-notification filter (lib/taskNotification.ts). Aggregate output
+  // only: --per-session files are deliberately complete transcripts, the same
+  // reason they are exempt from cross-session dedupe. It runs AFTER
+  // assignCcxids() — ids are assigned once over the full set shared with the
+  // per-session path, and removing a pair from this list afterwards cannot
+  // shift the ids of the survivors.
+  const visible = allPairs.filter(p => !isTaskNotificationOnly(p.question, p.answer));
+  if (opts.verbose && visible.length < allPairs.length) {
+    out.log(`Skipped ${allPairs.length - visible.length} task-notification pair(s) with no answer.`);
+  }
+  const sorted = [...visible].sort(compareUnifiedPairs);
   // Two-stage dedupe (§6.3): first the conservative per-session logical dedupe
   // (snapshots / prefixes / identical whole files), then the cross-session pass
   // that drops resumed/forked verbatim copies of the same turn by message uuid.

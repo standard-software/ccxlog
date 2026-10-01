@@ -558,6 +558,13 @@ nothing has changed, the file's modification time is preserved as well.
   has produced no answer yet keep being merged into the same pair as before.
   (Since 1.4.0; previously the retyped message silently replaced the
   cancelled question.)
+- **Harness notifications are skipped.** Claude Code injects a
+  `<task-notification>` block as a user-role message when a background task
+  finishes. A pair whose question is only such blocks and whose answer is
+  empty contains no words from either side of the conversation, so the
+  aggregate output skips it. A notification accompanied by typed text, or one
+  whose turn produced an answer, is kept, and `--per-session` files keep
+  every pair.
 - Output content is rebuilt from the source logs on every run. If you delete a
   source log, the corresponding pairs disappear on the next run. The actual
   file update is classified as a no-op, strict append, or full rewrite.

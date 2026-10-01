@@ -4,6 +4,17 @@
 
 ## Version
 
+### 1.10.0
+#### 2026/10/02(Fri)
+- skip, in the aggregate output, pairs that are nothing but a Claude Code
+  `<task-notification>` block with an empty answer. These blocks are injected
+  by Claude Code itself when a background task finishes and contain no words
+  from either side of the conversation. A notification with typed text beside
+  it, or one whose turn produced an answer, is kept, and `--per-session`
+  files keep every pair. On the first run after upgrading, existing blocks of
+  this kind leave the aggregate files, so the usual automatic backup is
+  taken once
+
 ### 1.9.0
 #### 2026/08/20(Thu)
 - output file names are fixed: `ccxlog.md` / `cclog.md` / `cxlog.md`, their
