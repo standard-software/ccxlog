@@ -80,6 +80,145 @@ test('codex: injected-context response_item is NOT recovered as a question', asy
   } finally { rmrf(dir); }
 });
 
+// The shape current Codex CLIs write: no event_msg.user_message at all, the
+// project instructions re-sent as a user response_item, and a developer message
+// between them and the question the human typed.
+const AGENTS_INJECTION = [
+  '# AGENTS.md instructions for /p',
+  '',
+  '<INSTRUCTIONS>',
+  'Reply in English.',
+  '</INSTRUCTIONS>',
+].join('\n');
+
+function agentsTurn() {
+  const user = (ts, text) => ({ type: 'response_item', timestamp: ts, payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text }] } });
+  return [
+    { type: 'session_meta', timestamp: '2026-05-27T11:00:00Z', payload: { session_id: 's', cwd: '/p', cli_version: '1' } },
+    { type: 'event_msg', timestamp: '2026-05-27T11:00:01Z', payload: { type: 'task_started', turn_id: 't1' } },
+    user('2026-05-27T11:00:02Z', AGENTS_INJECTION),
+    { type: 'response_item', timestamp: '2026-05-27T11:00:02Z', payload: { type: 'message', role: 'developer', content: [{ type: 'input_text', text: 'skills list' }] } },
+    user('2026-05-27T11:00:02Z', '<environment_context>x</environment_context>'),
+    { type: 'turn_context', timestamp: '2026-05-27T11:00:02Z', payload: { turn_id: 't1', cwd: '/p', model: 'gpt-5' } },
+    user('2026-05-27T11:00:03Z', 'What do you think?'),
+    { type: 'event_msg', timestamp: '2026-05-27T11:00:09Z', payload: { type: 'task_complete', last_agent_message: 'Keep it as it is.' } },
+  ];
+}
+
+for (const includeDeveloperMessages of [false, true]) {
+  test(`codex: re-sent AGENTS.md instructions never become the question (developer messages ${includeDeveloperMessages ? 'on' : 'off'})`, async () => {
+    const { dir, file } = codexFixture(agentsTurn());
+    try {
+      const { entries } = await readCodex(file, includeDeveloperMessages);
+      const pairs = buildCodexPairs(entries);
+      assert.equal(pairs.length, 1);
+      assert.equal(pairs[0].questionEntry.message.content, 'What do you think?');
+      assert.deepEqual(pairs[0].additionalQuestionEntries, []);
+      assert.equal(answerOf(pairs[0]), 'Keep it as it is.');
+    } finally { rmrf(dir); }
+  });
+}
+
+test('codex: withdrawn AGENTS.md instructions do not become a question of their own', async () => {
+  const user = (ts, text) => ({ type: 'response_item', timestamp: ts, payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text }] } });
+  const { dir, file } = codexFixture([
+    { type: 'session_meta', timestamp: '2026-05-27T11:00:00Z', payload: { session_id: 's', cwd: '/p', cli_version: '1' } },
+    { type: 'event_msg', timestamp: '2026-05-27T11:00:01Z', payload: { type: 'task_started', turn_id: 't1' } },
+    user('2026-05-27T11:00:02Z', '# AGENTS.md instructions\n\n<INSTRUCTIONS>\nThe previously provided AGENTS.md instructions no longer apply.\n</INSTRUCTIONS>'),
+    user('2026-05-27T11:00:03Z', 'Carry on'),
+    { type: 'event_msg', timestamp: '2026-05-27T11:00:09Z', payload: { type: 'task_complete', last_agent_message: 'Done.' } },
+  ]);
+  try {
+    const { entries } = await readCodex(file);
+    const pairs = buildCodexPairs(entries);
+    assert.deepEqual(pairs.map(p => p.questionEntry.message.content), ['Carry on']);
+  } finally { rmrf(dir); }
+});
+
+// The `u-N` uuid is the ccxlogId's question key for Codex, so a later question
+// must keep the number it had before the instructions were filtered out and
+// before mid-turn messages were recovered.
+test('codex: filtering instructions and recovering mid-turn messages renumbers no later question', async () => {
+  const user = (ts, text) => ({ type: 'response_item', timestamp: ts, payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text }] } });
+  const call = (ts, id) => ({ type: 'response_item', timestamp: ts, payload: { type: 'custom_tool_call', call_id: id, name: 'exec', input: 'ls' } });
+  const { dir, file } = codexFixture([
+    { type: 'session_meta', timestamp: '2026-05-27T11:00:00Z', payload: { session_id: 's', cwd: '/p', cli_version: '1' } },
+    { type: 'event_msg', timestamp: '2026-05-27T11:00:01Z', payload: { type: 'task_started', turn_id: 't1' } },
+    user('2026-05-27T11:00:02Z', AGENTS_INJECTION),            // used to take u-0
+    user('2026-05-27T11:00:03Z', 'First'),                     // u-1
+    call('2026-05-27T11:00:04Z', 'c1'),                        // a-2
+    user('2026-05-27T11:00:05Z', 'Typed mid-turn'),            // used to be dropped
+    { type: 'event_msg', timestamp: '2026-05-27T11:00:06Z', payload: { type: 'task_complete', last_agent_message: 'A1' } },   // a-3
+    { type: 'event_msg', timestamp: '2026-05-27T11:00:07Z', payload: { type: 'task_started', turn_id: 't2' } },
+    user('2026-05-27T11:00:08Z', 'Second'),                    // u-4
+    { type: 'event_msg', timestamp: '2026-05-27T11:00:09Z', payload: { type: 'task_complete', last_agent_message: 'A2' } },
+  ]);
+  try {
+    const { entries } = await readCodex(file);
+    const users = entries.filter(e => e.type === 'user').map(e => [e.message.content, e.uuid]);
+    assert.deepEqual(users, [['First', 'u-1'], ['Typed mid-turn', 'u-r0'], ['Second', 'u-4']]);
+  } finally { rmrf(dir); }
+});
+
+test('codex: a human message that only starts like the AGENTS.md heading is kept', async () => {
+  const { dir, file } = codexFixture([
+    { type: 'session_meta', timestamp: '2026-05-27T11:00:00Z', payload: { session_id: 's', cwd: '/p', cli_version: '1' } },
+    { type: 'event_msg', timestamp: '2026-05-27T11:00:01Z', payload: { type: 'task_started', turn_id: 't1' } },
+    { type: 'response_item', timestamp: '2026-05-27T11:00:02Z', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: '# AGENTS.md instructions for /p\nare these still right?' }] } },
+    { type: 'event_msg', timestamp: '2026-05-27T11:00:03Z', payload: { type: 'agent_message', message: 'Yes' } },
+  ]);
+  try {
+    const { entries } = await readCodex(file);
+    const pairs = buildCodexPairs(entries);
+    assert.equal(pairs.length, 1);
+    assert.match(pairs[0].questionEntry.message.content, /are these still right\?/);
+  } finally { rmrf(dir); }
+});
+
+test('codex: a message typed while the model is working is recovered as its own question', async () => {
+  const user = (ts, text) => ({ type: 'response_item', timestamp: ts, payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text }] } });
+  const call = (ts, id) => ({ type: 'response_item', timestamp: ts, payload: { type: 'custom_tool_call', call_id: id, name: 'exec', input: 'ls' } });
+  const { dir, file } = codexFixture([
+    { type: 'session_meta', timestamp: '2026-05-27T11:00:00Z', payload: { session_id: 's', cwd: '/p', cli_version: '1' } },
+    { type: 'event_msg', timestamp: '2026-05-27T11:00:01Z', payload: { type: 'task_started', turn_id: 't1' } },
+    user('2026-05-27T11:00:02Z', 'Fix the bug'),
+    call('2026-05-27T11:00:03Z', 'c1'),
+    // No user_message event exists for either message; both are response_items
+    // of the same turn, the second one arriving after the model started.
+    user('2026-05-27T11:00:04Z', 'What did you change?'),
+    call('2026-05-27T11:00:05Z', 'c2'),
+    user('2026-05-27T11:00:06Z', 'And the tests?'),
+    { type: 'event_msg', timestamp: '2026-05-27T11:00:09Z', payload: { type: 'task_complete', last_agent_message: 'All done.' } },
+  ]);
+  try {
+    const { entries } = await readCodex(file);
+    const pairs = buildCodexPairs(entries);
+    assert.deepEqual(pairs.map(p => p.questionEntry.message.content),
+      ['Fix the bug', 'What did you change?', 'And the tests?']);
+    assert.equal(answerOf(pairs[2]), 'All done.');
+  } finally { rmrf(dir); }
+});
+
+test('codex: a turn that records user_message events still ignores the response_item copies', async () => {
+  const user = (ts, text) => ({ type: 'response_item', timestamp: ts, payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text }] } });
+  const { dir, file } = codexFixture([
+    { type: 'session_meta', timestamp: '2026-05-27T11:00:00Z', payload: { session_id: 's', cwd: '/p', cli_version: '1' } },
+    { type: 'event_msg', timestamp: '2026-05-27T11:00:01Z', payload: { type: 'task_started', turn_id: 't1' } },
+    user('2026-05-27T11:00:02Z', 'Fix the bug'),
+    { type: 'event_msg', timestamp: '2026-05-27T11:00:02Z', payload: { type: 'user_message', message: 'Fix the bug' } },
+    { type: 'response_item', timestamp: '2026-05-27T11:00:03Z', payload: { type: 'custom_tool_call', call_id: 'c1', name: 'exec', input: 'ls' } },
+    user('2026-05-27T11:00:04Z', 'What did you change?'),
+    { type: 'event_msg', timestamp: '2026-05-27T11:00:04Z', payload: { type: 'user_message', message: 'What did you change?' } },
+    { type: 'event_msg', timestamp: '2026-05-27T11:00:09Z', payload: { type: 'task_complete', last_agent_message: 'All done.' } },
+  ]);
+  try {
+    const { entries } = await readCodex(file);
+    const pairs = buildCodexPairs(entries);
+    assert.deepEqual(pairs.map(p => p.questionEntry.message.content), ['Fix the bug', 'What did you change?']);
+    assert.ok(pairs.every(p => p.additionalQuestionEntries.length === 0));
+  } finally { rmrf(dir); }
+});
+
 test('codex: the FIRST token_count credits the cumulative total, not last_token_usage', async () => {
   const { dir, file } = codexFixture([
     { type: 'session_meta', timestamp: '2026-05-27T11:00:00Z', payload: { session_id: 's', cwd: '/p', cli_version: '1' } },

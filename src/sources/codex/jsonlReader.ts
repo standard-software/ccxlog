@@ -97,6 +97,21 @@ function startsWithOpeningTag(value: string, tag: string): boolean {
     || (boundary !== undefined && /\s/.test(boundary));
 }
 
+// The project instructions Codex hands the model. Older CLIs wrapped them in
+// `<user_instructions>`; newer ones send a Markdown heading — with the project
+// directory when instructions are supplied (`# AGENTS.md instructions for
+// <dir>`), bare when they are withdrawn — followed by an `<INSTRUCTIONS>`
+// element, and send it again, mid-session, whenever AGENTS.md changes. Both
+// halves are required so that a human message which merely starts with the
+// same heading is kept.
+const AGENTS_INSTRUCTIONS_HEADING_RE = /^# AGENTS\.md instructions(?: for [^\n]*)?\r?\n/;
+
+function isAgentsInstructions(head: string): boolean {
+  const heading = AGENTS_INSTRUCTIONS_HEADING_RE.exec(head);
+  if (!heading) return false;
+  return head.slice(heading[0].length).trimStart().startsWith('<INSTRUCTIONS>');
+}
+
 function isFallbackNoise(value: string): boolean {
   const head = value.trimStart();
   return head.startsWith('<system-')
@@ -291,6 +306,12 @@ export async function readJsonl(filePath: string, includeDeveloperMessages = fal
   const entries: LogEntry[] = [];
   let skippedLines = 0;
   let sequence = 0;
+  // Numbers the user messages recovered from a turn that had already flushed
+  // its fallbacks once (see flushFallback). They are kept out of `sequence` on
+  // purpose: the `u-N` uuid is the ccxlogId's question key, so drawing them
+  // from the shared counter would renumber every later entry of the session
+  // and reissue the ids of blocks this recovery has nothing to do with.
+  let recoveredSequence = 0;
   let sessionId = '';
   let sessionName = '';
   let sessionCwd = '';
@@ -326,7 +347,11 @@ export async function readJsonl(filePath: string, includeDeveloperMessages = fal
   // event_msg.user_message). Keep ALL of them, each with its own timestamp, so
   // a turn with several fallback questions doesn't collapse to just the last
   // one and a trailing fallback at EOF isn't lost.
-  let fallbackUsers: Array<{ content: string; timestamp: string }> = [];
+  // `noise` marks the re-sent project instructions (isAgentsInstructions): never
+  // rendered, but still queued so flushFallback can account for them.
+  let fallbackUsers: Array<{ content: string; timestamp: string; noise?: boolean }> = [];
+  // Has this turn already flushed a non-empty batch of fallbacks?
+  let fallbackFlushed = false;
   // Verified per-item message ids already seen this turn — the only signal that
   // lets us drop a fallback as a replay. Reset at every turn boundary.
   const fallbackStableIds = new Set<string>();
@@ -342,6 +367,7 @@ export async function readJsonl(filePath: string, includeDeveloperMessages = fal
     content: string,
     timestamp: string,
     instruction?: { turnId: string; msgId: string; delegateReply: boolean },
+    recovered = false,
   ): void => {
     const ownTurnId = instruction?.turnId || turnId;
     // A delegate reply is pushed through this same path, and therefore still
@@ -352,7 +378,7 @@ export async function readJsonl(filePath: string, includeDeveloperMessages = fal
     // nothing to do with subagents. Keeping the counter intact confines the id
     // change to the reclassified records themselves.
     const entry: UserEntry = {
-      type: 'user', uuid: `u-${sequence++}`,
+      type: 'user', uuid: recovered ? `u-r${recoveredSequence++}` : `u-${sequence++}`,
       message: { role: 'user', content }, ...common(timestamp), turnId: ownTurnId,
     };
     if (instruction) {
@@ -408,10 +434,32 @@ export async function readJsonl(filePath: string, includeDeveloperMessages = fal
   // task_complete — so an interrupted turn (no task_complete) still keeps its
   // question and multiple fallbacks are all preserved (§6.2). Each keeps its
   // own timestamp so ordering stays correct.
+  //
+  // `sawUserEvent` means exactly "this turn recorded an event_msg.user_message"
+  // and nothing else. A flush must not set it: a message typed while the model
+  // is already working arrives as a later response_item of the SAME turn, and
+  // CLIs that record no user_message event at all have only this path to
+  // recover it. Marking the turn as served after the first flush silently
+  // dropped every such message. Emptying the list is what prevents a second
+  // flush from emitting anything twice.
+  //
+  // Numbering keeps every id issued before this recovery existed exactly where
+  // it was. Up to 1.10.0 only the FIRST batch of a turn was emitted, and the
+  // re-sent project instructions were emitted with it as if they were a
+  // question. So the first batch still draws from `sequence` — the instructions
+  // consuming their number without producing an entry — and a later batch,
+  // which used to be dropped whole, draws from `recoveredSequence` and consumes
+  // nothing. Only the blocks that were actually wrong change identity.
   const flushFallback = (): void => {
-    if (!sawUserEvent && fallbackUsers.length) {
-      for (const fb of fallbackUsers) pushUser(fb.content, fb.timestamp);
-      sawUserEvent = true;   // guard against a double-flush within the turn
+    if (!sawUserEvent) {
+      for (const fb of fallbackUsers) {
+        if (fb.noise) {
+          if (!fallbackFlushed) sequence++;
+          continue;
+        }
+        pushUser(fb.content, fb.timestamp, undefined, fallbackFlushed);
+      }
+      if (fallbackUsers.length) fallbackFlushed = true;
     }
     fallbackUsers = [];
   };
@@ -488,6 +536,7 @@ export async function readJsonl(filePath: string, includeDeveloperMessages = fal
       flushFallback();
       turnId = text(payload.turn_id) || turnId;
       sawUserEvent = false;
+      fallbackFlushed = false;
       fallbackUsers = [];
       fallbackStableIds.clear();
       return;
@@ -577,7 +626,9 @@ export async function readJsonl(filePath: string, includeDeveloperMessages = fal
         // (timestamp, content) key (r5 report: approach A's flaw was dropping a
         // legitimately distinct utterance; approach B excludes only when an id
         // is present).
-        if (value && !isFallbackNoise(value)) {
+        if (value && isAgentsInstructions(value.trimStart())) {
+          fallbackUsers.push({ content: '', timestamp, noise: true });
+        } else if (value && !isFallbackNoise(value)) {
           const stableId = verifiedUserMessageId(payload);
           if (!stableId || !fallbackStableIds.has(stableId)) {
             fallbackUsers.push({ content: value, timestamp });

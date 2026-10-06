@@ -4,6 +4,21 @@
 
 ## Version
 
+### 1.11.0
+#### 2026/10/06(Tue)
+- recover Codex questions that current Codex CLIs record only as
+  `response_item` user messages. A message typed while the model was already
+  working was dropped from the output entirely; it now appears as its own
+  block
+- stop treating the project instructions Codex re-sends when `AGENTS.md`
+  changes (`# AGENTS.md instructions ...`) as a question. They used to be
+  prepended to the real question, and with `codex.includeDeveloperMessages`
+  enabled they replaced it, leaving a block whose question and answer did not
+  match
+- existing blocks keep their `ccxlogid`. Only the blocks that began with the
+  instructions text get a new one, so the first run after upgrading takes the
+  usual automatic backup once
+
 ### 1.10.0
 #### 2026/10/02(Fri)
 - skip, in the aggregate output, pairs that are nothing but a Claude Code
