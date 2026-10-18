@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import {
-  run, workspace, writeConfig, writeJsonl, read, encodeCwd, claudeQA, codexQA,
+  run, workspace, writeConfig, writeJsonl, read, encodeCwd, claudeQA, codexQA, countPairs,
 } from './helpers.mjs';
 
 test('recursion is source-defined and legacy config values are ignored', t => {
@@ -130,3 +130,29 @@ test('per-session prefixes are fixed: configuring them is a fatal config error',
   assert.match(r.stderr, /outputSessionFilePrefix is no longer supported/);
 });
 
+
+// NTFS file ids exceed 2^53, so a plain-number inode loses its low bits and
+// directories created one after another can share an identity key. Discovery
+// used that key to skip "already visited" directories and dropped real ones.
+// NTFS raises a record's sequence number (the id's top 16 bits) every time
+// the record is reused, which is what pushes ids past 2^53. Churning a batch of
+// directories first makes the fixture reuse those records, so on Windows
+// adjacent directories collide reliably; elsewhere the test simply passes.
+test('directories created back to back are all discovered (exact inode keys)', t => {
+  const ws = workspace(t);
+  const N = 120;
+  const churn = path.join(ws.root, 'churn');
+  for (let round = 0; round < 40; round++) {
+    for (let i = 0; i < 2 * N; i++) fs.mkdirSync(path.join(churn, String(i)), { recursive: true });
+    fs.rmSync(churn, { recursive: true, force: true });
+  }
+  for (let i = 0; i < N; i++) {
+    const day = String(i).padStart(3, '0');
+    writeJsonl(path.join(ws.cxLogs, '2026', '07', day, `rollout-${day}.jsonl`),
+      codexQA(ws.project, { sessionId: `cx-${day}`, q: `codex question ${day}` }));
+  }
+  writeConfig(ws.out, { codex: { extraLogDirs: [ws.cxLogs] } });
+  const r = run([ws.project, '--out', ws.out, '-cx'], { home: ws.home });
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(countPairs(path.join(ws.out, 'cxlog.md')), N);
+});

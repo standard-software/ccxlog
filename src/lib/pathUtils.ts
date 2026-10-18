@@ -205,7 +205,14 @@ export interface FileIdentity {
 export async function fileIdentity(filePath: string): Promise<FileIdentity | null> {
   try {
     const st = await fs.stat(filePath);
-    const key = st.ino !== 0 ? `dev:${st.dev}:ino:${st.ino}` : canonicalPathString(filePath);
+    // The key needs the EXACT inode, so it comes from a bigint stat. NTFS file
+    // ids exceed 2^53, and as plain numbers the low bits are rounded away:
+    // directories and files created close together then share a key, and
+    // discovery silently skips one of them as "already visited" (observed:
+    // whole Codex date directories dropped). The snapshot keeps the plain stat,
+    // since a bigint mtimeMs drops the fraction fileSnapshot() compares against.
+    const big = await fs.stat(filePath, { bigint: true });
+    const key = big.ino !== 0n ? `dev:${big.dev}:ino:${big.ino}` : canonicalPathString(filePath);
     return { key, snapshot: { size: st.size, mtimeMs: st.mtimeMs, dev: st.dev, ino: st.ino } };
   } catch {
     return null;

@@ -22,6 +22,10 @@
 - a lock now records the runtime that wrote it. Windows and WSL report the
   same hostname, and a WSL watch's lock could be taken for a stale Windows
   lock and removed
+- on Windows, log folders and files could be skipped without a warning.
+  NTFS file ids are larger than a JavaScript number holds exactly, so two
+  directories created close together could look like the same one, and the
+  second was taken for already read. Codex date folders were the usual victim
 
 ### 1.11.0
 #### 2026/10/06(Tue)
