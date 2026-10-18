@@ -22,6 +22,8 @@ export function parseArgs(argv: string[]): ParseResult {
   let backupMd = false;
   let lock = false;
   let forceUnlock = false;
+  let stop = false;
+  let stopAll = false;
   let watch = false;
   let watchDurationSeconds: number | null = null;
   let watchTokens = 0;   // how many `--watch` tokens appeared (two or more is a usage error, §3.3)
@@ -68,6 +70,10 @@ export function parseArgs(argv: string[]): ParseResult {
       lock = true;
     } else if (a === '--force-unlock') {
       forceUnlock = true;
+    } else if (a === '--stop') {
+      stop = true;
+    } else if (a === '--stop-all') {
+      stopAll = true;
     } else if (a === '--version' || a === '-v' || a === '-V') {
       wantVersion = true;
     } else if (a === '--help' || a === '-h') {
@@ -93,6 +99,8 @@ export function parseArgs(argv: string[]): ParseResult {
     initTemplate ? '--init-template' : '',
     backupJsonl ? '--backup-jsonl' : '',
     backupMd ? '--backup-md' : '',
+    stop ? '--stop' : '',
+    stopAll ? '--stop-all' : '',
   ].filter(Boolean);
   if (watchTokens >= 2) {
     return {
@@ -138,6 +146,18 @@ export function parseArgs(argv: string[]): ParseResult {
   if (perSession && standalone.length > 0) {
     return { kind: 'error', msg: `--per-session cannot be combined with ${standalone[0]}` };
   }
+  // Stopping writes nothing of its own and takes no lock, so the options that
+  // shape a write have no meaning next to it.
+  if (stop || stopAll) {
+    const flag = stop ? '--stop' : '--stop-all';
+    const extra = [dryRun ? '--dry-run' : '', lock ? '--lock' : '', forceUnlock ? '--force-unlock' : '']
+      .filter(Boolean);
+    if (extra.length > 0) return { kind: 'error', msg: `${flag} cannot be combined with ${extra[0]}` };
+  }
+  // --stop-all is not about one folder: every registered watch is stopped.
+  if (stopAll && (projectPath !== null || outDir !== null)) {
+    return { kind: 'error', msg: '--stop-all stops every watch; it takes no project path or --out.' };
+  }
 
   const finalProjectPath = path.resolve(projectPath ?? process.cwd());
   const finalOutDir = path.resolve(outDir ?? path.join(finalProjectPath, 'CCXLOG'));
@@ -159,6 +179,8 @@ export function parseArgs(argv: string[]): ParseResult {
       forceUnlock,
       watch,
       watchDurationSeconds,
+      stop,
+      stopAll,
     },
   };
 }

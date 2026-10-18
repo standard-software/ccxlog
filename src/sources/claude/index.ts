@@ -4,6 +4,7 @@ import type { CcxlogConfig } from '../../lib/config.js';
 import { encodeCwd, getClaudeProjectsDir, sha256HexBytes, canonicalPathString, canonicalPath, isPathWithin, buildRelativeId } from '../../lib/pathUtils.js';
 import type { SourceAdapter, RootRef, DiscoveredFile, SessionData, FilterContext } from '../adapter.js';
 import { applyProgressRetention } from '../../lib/progressData.js';
+import { forEachLine } from '../../lib/lineStream.js';
 import { readJsonl } from './jsonlReader.js';
 import { buildPairsSplit, extractSessionName } from './pairBuilder.js';
 
@@ -19,6 +20,13 @@ function sessionIdFor(rootDir: string, filePath: string): string {
 // subdirectory candidate is genuinely nested under the project (not a
 // same-prefix sibling). Mirrors cclog's firstLoggedCwd. Returns undefined if
 // no cwd is present anywhere.
+//
+// This runs for every candidate folder on every watch cycle, so it reads only
+// as far as the first cwd (usually the first few lines) instead of parsing whole
+// sessions, and remembers which file answered. A logged cwd never changes once
+// written, so the remembered answer stays valid for as long as that file exists.
+const firstCwdMemo = new Map<string, { name: string; cwd: string }>();
+
 async function firstLoggedCwd(logDir: string): Promise<string | undefined> {
   let names: string[];
   try {
@@ -26,18 +34,29 @@ async function firstLoggedCwd(logDir: string): Promise<string | undefined> {
   } catch {
     return undefined;
   }
+  const memo = firstCwdMemo.get(logDir);
+  if (memo && names.includes(memo.name)) return memo.cwd;
   for (const name of names) {
-    let entries;
+    let found: string | undefined;
     try {
-      ({ entries } = await readJsonl(path.join(logDir, name)));
+      await forEachLine(path.join(logDir, name), (line) => {
+        if (!line.includes('"cwd"')) return;
+        try {
+          const cwd = (JSON.parse(line) as { cwd?: unknown }).cwd;
+          if (typeof cwd === 'string' && cwd) { found = cwd; return false; }
+        } catch {
+          // A broken line is skipped, as the full reader would.
+        }
+      });
     } catch {
       continue;
     }
-    for (const e of entries) {
-      const cwd = (e as { cwd?: unknown }).cwd;
-      if (typeof cwd === 'string' && cwd) return cwd;
+    if (found) {
+      firstCwdMemo.set(logDir, { name, cwd: found });
+      return found;
     }
   }
+  firstCwdMemo.delete(logDir);
   return undefined;
 }
 

@@ -42,6 +42,9 @@ import {
   type BackupReason,
 } from './lib/backup.js';
 import { acquireLock, releaseLock, type LockHandle } from './lib/lock.js';
+import {
+  clearStopRequest, registerWatch, stopAll, stopOutDir, stopRequested, unregisterWatch, STOP_POLL_MS,
+} from './lib/stop.js';
 import { collectingSink, consoleSink, type OutputSink } from './lib/outputSink.js';
 import {
   cacheKey, createAnalysisCache,
@@ -88,6 +91,9 @@ interface RunOutcome {
   writeLabel: string;
   failure?: string;
   intervalSeconds: number;
+  // The cycle found its inputs and outputs exactly as the last successful cycle
+  // left them and returned without rendering (see CycleSkipState).
+  skipped?: boolean;
 }
 
 function outcome(fields: Partial<RunOutcome> & { code: number }): RunOutcome {
@@ -332,6 +338,86 @@ function analysisFingerprint(config: CcxlogConfig, opts: CliOptions, ctx: Filter
   });
 }
 
+// Whole-cycle skip for watch mode. A quiet cycle used to re-render every block,
+// re-read both aggregate files and compare them only to conclude "noop" — a cost
+// that grows with the whole history, archive included. When every input that
+// shapes the output is exactly what the last successful cycle saw, the output
+// that cycle wrote is still the answer, so the cycle stops right after analysis.
+//
+// The inputs are: the analysis premises (config including the template body,
+// mode, target project), the discovery roots, every discovered file's four
+// attributes (all of them must be cache hits — a reparsed file always means a
+// full cycle), each session's name and kept-pair count (Codex thread names
+// change without touching the rollout), the local date (the recent/archive
+// split moves only at midnight), and the out directory's Markdown files as the
+// last cycle left them (a file edited, replaced or deleted by hand is rebuilt).
+export interface CycleSkipState {
+  inputs: string | null;
+  outputs: string | null;
+  last: RunOutcome | null;
+}
+
+export function createCycleSkipState(): CycleSkipState {
+  return { inputs: null, outputs: null, last: null };
+}
+
+function localDateKey(d: Date): string {
+  return `${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}`;
+}
+
+function cycleInputsKey(fingerprint: string, opts: CliOptions, adapterRuns: AdapterRun[]): string {
+  return JSON.stringify({
+    fingerprint,
+    outDir: opts.outDir,
+    perSession: opts.perSession,
+    dryRun: opts.dryRun,
+    day: localDateKey(archiveNow()),
+    sources: adapterRuns.map(ar => ({
+      id: ar.adapter.id,
+      roots: ar.roots.map(r => [r.origin, r.stableRootKey, r.dir]),
+      files: ar.files.map(f => [f.filePath, f.snapshot ?? null]),
+      sessions: ar.sessions.map(s => [s.sessionId, s.sessionName, s.allPairs.length]),
+    })),
+  });
+}
+
+// The Markdown files directly in <out> (the only files a write cycle creates,
+// rewrites or deletes), with their size and mtime.
+async function outputFilesKey(outDir: string): Promise<string> {
+  let names: string[];
+  try {
+    names = (await fs.readdir(outDir)).filter(n => n.endsWith('.md')).sort();
+  } catch {
+    return '[]';
+  }
+  const parts: Array<[string, number, number]> = [];
+  for (const n of names) {
+    try {
+      const st = await fs.stat(path.join(outDir, n));
+      if (st.isFile()) parts.push([n, st.size, st.mtimeMs]);
+    } catch {
+      // Vanished between readdir and stat: simply absent from the key.
+    }
+  }
+  return JSON.stringify(parts);
+}
+
+// Turn the last real outcome into this cycle's: every file it touched is now a
+// noop, and nothing changed.
+function skippedOutcome(last: RunOutcome, intervalSeconds: number): RunOutcome {
+  const files = WRITE_KINDS.reduce((n, k) => n + last.writes[k], 0);
+  const writes = emptyWriteCounts();
+  writes.noop = files;
+  return outcome({
+    code: EXIT_OK,
+    pairs: last.pairs,
+    writes,
+    writeLabel: describeWrites(writes),
+    intervalSeconds,
+    skipped: true,
+  });
+}
+
 // One cycle's analysis (discovered files -> sessions). With a `cache`, a file
 // whose four attributes match last cycle skips both the prefilter and the full
 // parse and is reused. Without a cache (a single run) the path is exactly the
@@ -427,6 +513,7 @@ async function run(
   opts: CliOptions,
   out: OutputSink = consoleSink,
   cache?: AnalysisCache,
+  skip?: CycleSkipState,
 ): Promise<RunOutcome> {
   const { config, errors: configErrors, warnings } = await loadConfig(opts.outDir, opts.projectPath);
   for (const w of warnings) out.warn(w);
@@ -525,7 +612,8 @@ async function run(
     canonicalProjectPath,
   };
   // Drop the whole cache if the premises of the analysis changed (a no-op otherwise).
-  cache?.useFingerprint(analysisFingerprint(config, opts, filterCtx));
+  const fingerprint = analysisFingerprint(config, opts, filterCtx);
+  cache?.useFingerprint(fingerprint);
   for (const ar of adapterRuns) {
     await readAdapterSessions(ar, config, filterCtx, cache);
     if (ar.adapter.refreshSessionMetadata) {
@@ -541,6 +629,29 @@ async function run(
   if (opts.backupJsonl) {
     return plain(await backupJsonl(opts, adapterRuns, out));
   }
+
+  // Whole-cycle skip (CycleSkipState). Only when nothing had to be re-read.
+  let inputsKey: string | null = null;
+  if (skip && cache) {
+    const allReused = adapterRuns.every(ar => ar.reparsed === 0);
+    inputsKey = allReused ? cycleInputsKey(fingerprint, opts, adapterRuns) : null;
+    if (inputsKey !== null && skip.last && inputsKey === skip.inputs
+      && await outputFilesKey(opts.outDir) === skip.outputs) {
+      if (opts.verbose) out.log('No input or output changes since the last cycle; skipped rendering.');
+      return skippedOutcome(skip.last, intervalSeconds);
+    }
+    skip.inputs = null;
+    skip.outputs = null;
+    skip.last = null;
+  }
+  const remember = async (r: RunOutcome): Promise<RunOutcome> => {
+    if (skip && r.code === EXIT_OK) {
+      skip.inputs = inputsKey ?? (cache ? cycleInputsKey(fingerprint, opts, adapterRuns) : null);
+      skip.outputs = await outputFilesKey(opts.outDir);
+      skip.last = r;
+    }
+    return r;
+  };
 
   // Build UnifiedPairs for each session (questionOrdinal = index in filtered pairs).
   const sessionUnified: SessionUnified[] = [];
@@ -666,7 +777,7 @@ async function run(
   const r = opts.perSession
     ? await writePerSession(opts, config, sessionUnified, mdBackupDir, out)
     : await writeAggregate(opts, config, allPairs, sessionUnified, mdBackupDir, out);
-  return { ...r, intervalSeconds };
+  return remember({ ...r, intervalSeconds });
 }
 
 async function writeAggregate(
@@ -1321,6 +1432,9 @@ Options:
   --lock                 Explicitly request the output lock (write operations
                          and --watch lock automatically; kept for compatibility).
   --force-unlock         Remove a stale lock (use with --lock).
+  --stop                 Stop the --watch running for this project (its
+                         output directory), from another terminal.
+  --stop-all             Stop every --watch started in this environment.
   --watch                Run repeatedly: process, wait N seconds, process again
                          (N = watchIntervalSeconds in ccxlog.config.json;
                          default 5).
@@ -1394,21 +1508,43 @@ async function runWatch(opts: CliOptions): Promise<number> {
   // The incremental re-parse cache. It lives only for the watch process and
   // never touches disk, so cycle 1 starts empty — a classic cold run.
   const cache = createAnalysisCache();
+  const skip = createCycleSkipState();
+  const lastWarnings: string[] = [];
   // runWatch() owns the lifetime lock, so individual cycles must not reacquire it.
   const cycleOpts: CliOptions = { ...opts, lock: false, forceUnlock: false };
+  let watchLock: LockHandle | undefined;
+  // The wait between cycles also watches for `ccxlog --stop` (lib/stop.ts). It
+  // looks every STOP_POLL_MS, so a request takes effect within half a second of
+  // the current cycle finishing; a stop is never taken mid-cycle.
+  const sleepWatchingForStop = async (ms: number, signal: AbortSignal): Promise<void> => {
+    const end = Date.now() + ms;
+    for (;;) {
+      if (watchLock && await stopRequested(opts.outDir, watchLock.token)) {
+        loop.requestStop('request');
+        return;
+      }
+      const left = end - Date.now();
+      if (left <= 0 || signal.aborted) return;
+      try {
+        await delay(Math.min(left, STOP_POLL_MS), undefined, { signal });
+      } catch {
+        return;   // a stop request (signal) released the wait
+      }
+    }
+  };
   const loop = createWatchLoop({
     durationSeconds: opts.watchDurationSeconds,
     verbose: opts.verbose,
     out: consoleSink,
-    cycle: () => runCycle(cycleOpts, warningReporter, cycleDelayMs, cache),
+    cycle: () => runCycle(cycleOpts, warningReporter, cycleDelayMs, cache, skip, lastWarnings),
+    sleep: sleepWatchingForStop,
   });
 
   // Prevent competing watches and one-shot writes for the full watch lifetime,
   // including waits between cycles. A dry run preserves its no-write contract.
-  let watchLock: LockHandle | undefined;
   if (!opts.dryRun) {
     await fs.mkdir(opts.outDir, { recursive: true });
-    const res = await acquireLock(opts.outDir, false);
+    const res = await acquireLock(opts.outDir, false, true);
     if (res.error) {
       // acquireLock's message ends with "Re-run with --force-unlock", which a
       // watch cannot do (--watch and --force-unlock are mutually exclusive,
@@ -1421,7 +1557,16 @@ async function runWatch(opts: CliOptions): Promise<number> {
       return EXIT_RUNTIME;
     }
     watchLock = res.handle;
+    // Holding the lock, any stop request still in the folder was addressed to
+    // a previous holder.
+    await clearStopRequest(opts.outDir);
   }
+  // Make this watch reachable by `ccxlog --stop-all` (best effort).
+  const registration = await registerWatch({
+    outDir: canonOut,
+    projectPath: canonProject,
+    token: watchLock?.token ?? null,
+  });
 
   // 3. Signal handlers (§10.2). SIGTERM is POSIX-only.
   let sigintCount = 0;
@@ -1450,12 +1595,17 @@ async function runWatch(opts: CliOptions): Promise<number> {
     console.log(opts.perSession
       ? `  output:  per-session files in ${canonOut}`
       : `  output:  ${path.join(canonOut, aggregateName(opts.mode))}`);
-    console.log(`Press Ctrl+C to stop, or terminate pid ${process.pid} from another terminal (e.g. ${killHint}).`);
+    console.log(`Press Ctrl+C to stop, or run ccxlog --stop for this project from another terminal`
+      + ` (or terminate pid ${process.pid}, e.g. ${killHint}).`);
     summary = await loop.run();
   } finally {
     process.off('SIGINT', onSigint);
     if (process.platform !== 'win32') process.off('SIGTERM', onSigterm);
-    if (watchLock) await releaseLock(watchLock);
+    if (watchLock) {
+      await clearStopRequest(opts.outDir, watchLock.token);
+      await releaseLock(watchLock);
+    }
+    await unregisterWatch(registration);
   }
 
   for (const line of formatSummary(summary)) console.log(line);
@@ -1467,14 +1617,22 @@ async function runCycle(
   warningReporter: WarningReporter,
   delayMs: number,
   cache: AnalysisCache,
+  skip: CycleSkipState,
+  lastWarnings: string[],
 ): Promise<WatchCycleResult> {
   const warnings: string[] = [];
   const sink = opts.verbose ? consoleSink : collectingSink(warnings);
   cache.beginCycle();
   clearCanonicalPathCache();
   try {
-    const r = await run(opts, sink, cache);
+    const r = await run(opts, sink, cache, skip);
     if (delayMs > 0) await delay(delayMs);
+    // A skipped cycle stops before the warnings raised while rendering (template
+    // diagnostics and the like). Its inputs are those of the cycle that did
+    // render, so that cycle's warnings still stand; reporting them keeps the
+    // suppression state steady instead of re-printing them on the next change.
+    if (r.skipped) warnings.splice(0, warnings.length, ...lastWarnings);
+    else lastWarnings.splice(0, lastWarnings.length, ...warnings);
     if (!opts.verbose) warningReporter.report(warnings);
     return {
       ok: r.code === EXIT_OK,
@@ -1530,6 +1688,16 @@ async function main(): Promise<void> {
     console.error(r.msg);
     printHelp();
     process.exitCode = EXIT_USAGE;
+    return;
+  }
+  if (r.opts.stop) {
+    const res = await stopOutDir(r.opts.outDir, consoleSink);
+    process.exitCode = res === 'failed' ? EXIT_RUNTIME : EXIT_OK;
+    return;
+  }
+  if (r.opts.stopAll) {
+    const res = await stopAll(consoleSink);
+    process.exitCode = res.includes('failed') ? EXIT_RUNTIME : EXIT_OK;
     return;
   }
   if (r.opts.watch) {

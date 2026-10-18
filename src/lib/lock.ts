@@ -10,12 +10,32 @@ export interface LockHandle {
   token: string;
 }
 
-interface LockInfo {
+export interface LockInfo {
   host: string;
   pid: number;
   token: string;
   acquiredAt: string;
   startedAt: string;   // approximate process start time (§8.6)
+  // The runtime the holder runs in (see runtimeEnv). Absent in locks written
+  // before v1.12.0.
+  env?: string;
+  // The holder watches for a stop request file (ccxlog --stop). Absent in locks
+  // written before v1.12.0 and in one-shot runs.
+  stoppable?: boolean;
+}
+
+// Windows and WSL report the same hostname but have separate process tables, so
+// the hostname alone cannot say whether a pid in a lock is one this process can
+// see. The runtime is recorded beside it.
+export function runtimeEnv(): string {
+  if (process.platform === 'linux' && process.env.WSL_DISTRO_NAME) return `wsl:${process.env.WSL_DISTRO_NAME}`;
+  return process.platform;
+}
+
+// Is the lock's holder in this very environment (same host, same runtime)? A
+// lock from before v1.12.0 has no runtime, so only its hostname is compared.
+export function sameEnvironment(info: Pick<LockInfo, 'host' | 'env'>): boolean {
+  return info.host === os.hostname() && (info.env === undefined || info.env === runtimeEnv());
 }
 
 // Approximate the current process start time from its uptime. Recorded so a
@@ -24,11 +44,32 @@ function processStartedAt(): string {
   return new Date(Date.now() - process.uptime() * 1000).toISOString();
 }
 
-function lockPath(outDir: string): string {
+export function lockPath(outDir: string): string {
   return path.join(outDir, LOCK_FILE);
 }
 
-function pidAlive(pid: number): boolean {
+// The lock as it is on disk, with the exact bytes (for compare-and-swap
+// removal), or null when there is none or it cannot be read as a lock.
+export async function readLock(outDir: string): Promise<{ info: LockInfo; raw: string } | null> {
+  const raw = await fs.readFile(lockPath(outDir), 'utf-8').catch(() => null);
+  if (raw === null) return null;
+  try {
+    const info = JSON.parse(raw) as LockInfo;
+    return looksValid(info) ? { info, raw } : null;
+  } catch {
+    return null;
+  }
+}
+
+// Remove the lock only if it still holds exactly `raw`.
+export async function removeLockIfUnchanged(outDir: string, raw: string): Promise<boolean> {
+  const now = await fs.readFile(lockPath(outDir), 'utf-8').catch(() => null);
+  if (now !== raw) return false;
+  await fs.rm(lockPath(outDir), { force: true });
+  return true;
+}
+
+export function pidAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
     return true;
@@ -51,7 +92,11 @@ function looksValid(info: LockInfo): boolean {
 // then only via a compare-and-swap (re-read the exact bytes just before rm) so
 // we never delete a lock a fresh run wrote between our read and our remove.
 // Otherwise stop on the safe side; --force-unlock is the only manual override.
-export async function acquireLock(outDir: string, forceUnlock: boolean): Promise<{ handle?: LockHandle; error?: string }> {
+export async function acquireLock(
+  outDir: string,
+  forceUnlock: boolean,
+  stoppable = false,
+): Promise<{ handle?: LockHandle; error?: string }> {
   const filePath = lockPath(outDir);
   const token = crypto.randomBytes(12).toString('hex');
   const info: LockInfo = {
@@ -60,6 +105,8 @@ export async function acquireLock(outDir: string, forceUnlock: boolean): Promise
     token,
     acquiredAt: new Date().toISOString(),
     startedAt: processStartedAt(),
+    env: runtimeEnv(),
+    ...(stoppable ? { stoppable: true } : {}),
   };
 
   for (let attempt = 0; attempt < 2; attempt++) {
@@ -82,7 +129,9 @@ export async function acquireLock(outDir: string, forceUnlock: boolean): Promise
       continue; // retry acquisition
     }
 
-    const sameHost = existing ? existing.host === os.hostname() : false;
+    // A pid is only meaningful in the environment that wrote it: a WSL lock
+    // seen from Windows (same hostname) names a pid Windows cannot see.
+    const sameHost = existing ? sameEnvironment(existing) : false;
     if (existing && sameHost && looksValid(existing) && !pidAlive(existing.pid)) {
       // Same host, well-formed lock, and the holder PID is not running at all —
       // the original holder is unambiguously gone (PID-reuse only matters when a
@@ -101,7 +150,7 @@ export async function acquireLock(outDir: string, forceUnlock: boolean): Promise
     return {
       error: `Another ccxlog run holds the lock at ${filePath}`
         + (existing ? ` (host ${existing.host}, pid ${existing.pid}).` : '.')
-        + (existing && !sameHost ? ' It is on a different host; not auto-reclaiming.' : '')
+        + (existing && !sameHost ? ' It is on a different host or environment; not auto-reclaiming.' : '')
         + ' Re-run with --force-unlock to remove it manually.',
     };
   }

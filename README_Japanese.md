@@ -102,6 +102,9 @@ Options:
   --lock                 出力先の排他ロックを明示する（書き込み系と --watch は
                          自動でロックするため、互換性のために残している）。
   --force-unlock         クラッシュが残した古いロックを外す（--lock と併用）。
+  --stop                 このプロジェクト（の出力先）で動いている --watch を、
+                         別のターミナルから止める。
+  --stop-all             この環境で起動したすべての --watch を止める。
   --watch                「処理 → N 秒待機 → 処理」を繰り返す常駐モード
                          （N = ccxlog.config.json の watchIntervalSeconds・既定 5）。
   --watch=<n><単位>      同上。ただし開始からの経過時間で自動停止する
@@ -143,8 +146,8 @@ ccxlog -cc --watch=2h     # Claude Code のみ・2時間
   ため、稼働中に書き換えれば再起動なしで反映されます。
 - 既定では「変化があった周期」だけ1行出力します。`--verbose` で周期ごとの詳細が
   出ます。
-- 終了コード: 動作時間の満了は 0、Ctrl+C は 130、`kill`（POSIX）は 143、起動時の
-  致命エラーは 1、使用法エラーは 2。周期の失敗で watch は止まらず、終了コードにも
+- 終了コード: 動作時間の満了と `ccxlog --stop` による停止は 0、Ctrl+C は 130、
+  `kill`（POSIX）は 143、起動時の致命エラーは 1、使用法エラーは 2。周期の失敗で watch は止まらず、終了コードにも
   影響しません。
 
 `=` 形式は PowerShell / bash / zsh / cmd.exe のいずれでも、そのまま入力でき、
@@ -182,26 +185,75 @@ ccxlog -cc --watch=2h     # Claude Code のみ・2時間
 `reused` です。変化のない周期で `fully read` が大きいまま `reparsed: 0` になるのが
 正常な状態です。
 
-変化のない 46 MiB のログ（240 ファイル）では、無変化周期の処理時間が 0.8 秒から
-0.4 秒になりました。残りは探索・整形・スマート書き込みの比較で、この仕組みの
-対象外です。ピークメモリは1周期目（コールド）で決まり、周期を重ねても増えません。
+ピークメモリは1周期目（コールド）で決まり、周期を重ねても増えません。
+
+#### 変化のない周期
+
+前の周期から何も変わっていなければ、watch は Markdown の組み立て自体を省きます。
+次の条件がすべてそろうと、探索の直後にその周期を終えます。
+
+- 見つかったログがすべて前回のまま再利用できた
+- 設定・テンプレート・セッション名が同じ
+- 日付が変わっていない
+- 出力先の Markdown ファイルが、前の周期が書いたときのまま
+
+この場合、前の周期の出力がそのまま正しい内容です。`--verbose` では
+`No input or output changes since the last cycle; skipped rendering.` と表示し、
+各ファイルを noop として数えます。
+
+- 次のどれかが起きると、その周期は通常どおり組み立てます。
+  - ログの追記・追加・削除
+  - 設定やテンプレートの編集
+  - Codex スレッド名の変更
+  - 出力ファイルの手による編集や削除
+  - 日付の変わり目（直近ファイルから archive へブロックが移るため）
+- ログ 504 ファイル・5,169 ブロック（Markdown 13 MB）の実プロジェクトで、変化の
+  ない周期は 1.6 秒から 0.1 秒になりました。ログが変わった周期は従来どおり全体を
+  組み立てます。
 
 #### watch の停止
 
 起動したターミナルで **Ctrl+C** を押してください。実行中の周期を完走し、終了
 サマリを表示してから終了コード 130 で終わります。
 
-別のターミナルから止めたい場合は、開始バナーに表示される pid を指定して OS の
-手段で終了してください。
+別のターミナルからは `ccxlog --stop` か `ccxlog --stop-all` で止められます。
+
+```bash
+ccxlog --stop                       # カレントディレクトリのプロジェクトの watch
+ccxlog C:\path\to\project --stop    # 指定したプロジェクトの watch
+ccxlog --out D:\logs --stop         # その出力先に書いている watch
+ccxlog --stop-all                   # この環境で起動したすべての watch
+```
+
+- `--stop` は出力先のロックから watch を見つけ、停止を依頼します。watch は実行中
+  の周期を終えてから 0.5 秒以内にそれに気付きます。そのあと終了サマリを表示し、
+  ロックを外して終了コード 0 で終わります。
+  - Windows でも同じように動きます。
+  - 同じフォルダに書いている別環境の watch にも届きます（devcontainer 内の
+    watch をホスト側から止める、など）。
+- `--stop-all` は、この環境に登録されたすべての watch を止めます。
+  - 各 watch は動いている間、`~/.ccxlog/watches/` に自分を登録しています。
+  - Windows・WSL・各コンテナはホームフォルダもプロセスも別々なので、watch が
+    動いている環境ごとに `--stop-all` を実行してください。
+- 動いていない watch が残したロックは、`--stop` が取り除きます。
+- 1.12.0 より前の ccxlog で起動した watch には停止を依頼できません。
+  - `--stop` は、その pid がこの環境の ccxlog であることを確かめてから、pid で
+    終了させます。
+  - `--stop-all` には見えません（登録していないため）。新しいバージョンで一度
+    起動し直してください。
+
+開始バナーに表示される pid を指定して、OS の手段で終了することもできます。
 
 ```
 ccxlog watch started (pid 12345): interval 5s, duration unlimited, mode both
   project: C:\Users\you\projects\my-app
   output:  C:\Users\you\projects\my-app\CCXLOG\ccxlog.md
-Press Ctrl+C to stop, or terminate pid 12345 from another terminal (e.g. taskkill /F /PID 12345).
+Press Ctrl+C to stop, or run ccxlog --stop for this project from another terminal (or terminate pid 12345, e.g. taskkill /F /PID 12345).
 ```
 
-- **Windows**: `taskkill /F /PID 12345`
+- **Windows**: `taskkill /F /PID 12345` — その場で終了します。ロックは残りますが、
+  そのフォルダで次に ccxlog を実行・watch・`--stop` したときに、持ち主がもういない
+  ことを確かめて自動で取り除きます。
 - **Linux / WSL / macOS**: `kill 12345` — こちらは正規の停止経路（SIGTERM）です。
   実行中の周期を完走し、終了サマリを出して終了コード 143 で終わります。
 

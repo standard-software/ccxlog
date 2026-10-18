@@ -4,6 +4,25 @@
 
 ## Version
 
+### 1.12.0
+#### 2026/10/19(Mon)
+- `--watch` no longer re-renders when nothing has changed. A cycle in which
+  every log, the configuration, the session names, the date and the output
+  files are as the last cycle left them ends right after discovery. On a
+  project with 5,169 blocks, a quiet cycle went from 1.6 s to 0.1 s
+- with `includeSubdirectories`, telling a nested project apart from a
+  same-prefix sibling folder now reads only up to the first working directory
+  in its log, once, instead of parsing a whole session on every cycle
+- new `ccxlog --stop`: stops the watch for a project from another terminal.
+  The watch is asked to stop, finishes its current cycle and releases its
+  lock, on Windows too, and also when it runs in another environment that
+  writes to the same folder
+- new `ccxlog --stop-all`: stops every watch started in the environment where
+  it runs. Each watch registers itself in `~/.ccxlog/watches/` while it runs
+- a lock now records the runtime that wrote it. Windows and WSL report the
+  same hostname, and a WSL watch's lock could be taken for a stale Windows
+  lock and removed
+
 ### 1.11.0
 #### 2026/10/06(Tue)
 - recover Codex questions that current Codex CLIs record only as

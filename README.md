@@ -106,6 +106,9 @@ Options:
                          operations and --watch lock automatically; this option is
                          retained for compatibility).
   --force-unlock         Remove a stale lock left by a crashed run (use with --lock).
+  --stop                 Stop the --watch running for this project (its output
+                         directory), from another terminal.
+  --stop-all             Stop every --watch started in this environment.
   --watch                Run repeatedly: process, wait N seconds, process again
                          (N = watchIntervalSeconds in ccxlog.config.json; default 5).
   --watch=<n><unit>      Same, but stop after the given duration measured from the
@@ -149,8 +152,8 @@ ccxlog -cc --watch=2h     # Claude Code only, for two hours
   restart.
 - By default only cycles that changed something print a line. `--verbose` prints
   the full per-cycle detail.
-- Exit codes: 0 when the duration elapses, 130 for Ctrl+C, 143 for `kill`
-  (POSIX), 1 for a startup failure, 2 for a usage error. A failed cycle does not
+- Exit codes: 0 when the duration elapses or `ccxlog --stop` stops it, 130 for
+  Ctrl+C, 143 for `kill` (POSIX), 1 for a startup failure, 2 for a usage error. A failed cycle does not
   stop the watch and does not change the exit code.
 
 The `=` form is safe to type as-is in PowerShell, bash, zsh and cmd.exe; no
@@ -191,27 +194,78 @@ is still counted in `fully read`. The number actually read from disk this cycle 
 `reparsed`; `reused` is the rest. In a quiet cycle you will therefore see a large
 `fully read` next to `reparsed: 0`, and that is the mechanism working.
 
-On an unchanging 46 MiB log set (240 files), no-change cycles went from 0.8 s to
-0.4 s; the remaining time is discovery, rendering and the smart-write comparison,
-which this mechanism does not touch. Peak memory is set by the first (cold)
-cycle and does not grow with the number of cycles.
+Peak memory is set by the first (cold) cycle and does not grow with the number
+of cycles.
+
+#### Quiet cycles
+
+When nothing has changed since the last cycle, a watch does not even render. The
+cycle ends right after discovery when all of these are true:
+
+- every discovered log was reused unchanged;
+- the configuration, template and session names are the same;
+- the date has not changed;
+- the Markdown files in the output directory are exactly as the last cycle left
+  them.
+
+In that case the last cycle's output is still correct. Under `--verbose` the
+cycle prints `No input or output changes since the last cycle; skipped
+rendering.` and reports its files as noop.
+
+- Any of these changes ends the skip:
+  - a log that grows, appears or is removed;
+  - an edited configuration or template;
+  - a renamed Codex thread;
+  - an output file edited or deleted by hand;
+  - midnight, when blocks move from the recent file to the archive.
+- On a real project with 504 log files and 5,169 blocks (13 MB of Markdown), a
+  quiet cycle went from 1.6 s to 0.1 s. A cycle in which a log did change still
+  renders everything, as before.
 
 #### Stopping a watch
 
 Press **Ctrl+C** in the terminal that runs it. The watch finishes the cycle it is
 in, prints a summary, and exits with code 130.
 
-To stop it from another terminal, use your OS with the pid printed in the start
+From another terminal, use `ccxlog --stop` or `ccxlog --stop-all`:
+
+```bash
+ccxlog --stop                       # the watch for the project in the current directory
+ccxlog C:\path\to\project --stop    # the watch for that project
+ccxlog --out D:\logs --stop         # the watch writing to that output directory
+ccxlog --stop-all                   # every watch started in this environment
+```
+
+- `--stop` finds the watch through the lock in the output directory and asks it
+  to stop. The watch notices within half a second of finishing its current
+  cycle. It then prints its summary, releases the lock and exits with code 0.
+  - This works the same on Windows.
+  - It also reaches a watch running in another environment that writes to the
+    same folder, such as a watch inside a devcontainer stopped from the host.
+- `--stop-all` stops every watch registered in this environment.
+  - Each watch registers itself in `~/.ccxlog/watches/` while it runs.
+  - Windows, WSL and each container have their own home folder and processes,
+    so run `--stop-all` in each environment where watches run.
+- `--stop` also removes a lock left behind by a watch that is no longer running.
+- Watches started by a ccxlog older than 1.12.0 cannot be asked to stop.
+  - `--stop` checks that the pid really is ccxlog in this environment, then
+    terminates it by pid.
+  - `--stop-all` does not see these watches, because they never registered.
+    Restart them once with the new version.
+
+You can also stop a watch with your OS, using the pid printed in the start
 banner:
 
 ```
 ccxlog watch started (pid 12345): interval 5s, duration unlimited, mode both
   project: C:\Users\you\projects\my-app
   output:  C:\Users\you\projects\my-app\CCXLOG\ccxlog.md
-Press Ctrl+C to stop, or terminate pid 12345 from another terminal (e.g. taskkill /F /PID 12345).
+Press Ctrl+C to stop, or run ccxlog --stop for this project from another terminal (or terminate pid 12345, e.g. taskkill /F /PID 12345).
 ```
 
-- **Windows**: `taskkill /F /PID 12345`
+- **Windows**: `taskkill /F /PID 12345` stops the watch immediately. It leaves
+  the lock behind. The next ccxlog run, watch or `--stop` in that folder sees
+  that its holder is gone and removes it automatically.
 - **Linux / WSL / macOS**: `kill 12345` — this is a graceful stop (SIGTERM): the
   current cycle finishes, the summary is printed, and the exit code is 143.
 

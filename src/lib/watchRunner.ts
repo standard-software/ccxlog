@@ -28,7 +28,7 @@ export interface WatchCycleResult {
   cache?: { reparsed: number; reused: number };
 }
 
-export type StopReason = 'duration' | 'sigint' | 'sigterm';
+export type StopReason = 'duration' | 'sigint' | 'sigterm' | 'request';
 
 export interface WatchLoopSummary {
   reason: StopReason;
@@ -64,12 +64,14 @@ const STOP_LABEL: Record<StopReason, string> = {
   duration: 'duration elapsed',
   sigint: 'interrupted (Ctrl+C)',
   sigterm: 'terminated (SIGTERM)',
+  request: 'stop requested (ccxlog --stop)',
 };
 
 const STOP_CODE: Record<StopReason, number> = {
   duration: 0,
   sigint: 130,
   sigterm: 143,
+  request: 0,
 };
 
 function two(n: number): string {

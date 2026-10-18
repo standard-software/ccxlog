@@ -2,7 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
+import os from 'node:os';
+import { spawn, spawnSync } from 'node:child_process';
 import {
   ROOT, CLI, mkTmp, rmrf, runCli, writeJsonl, writeClaudeSession, writeCodexSession,
   writeCodexSessionIndex, claudeQA, codexQA, countPairs,
@@ -504,7 +505,8 @@ test('C-11b (§9.2): the start banner reports pid, interval, duration and the tw
   assert.match(st.stdout, /^ {2}output: {2}.+ccxlog\.md$/m);
   const hint = st.stdout.split('\n').filter(l => /^Press Ctrl\+C to stop/.test(l));
   assert.equal(hint.length, 1, st.stdout);
-  assert.match(hint[0], new RegExp(`terminate pid \\d+ from another terminal \\(e\\.g\\. ${
+  assert.match(hint[0], /run ccxlog --stop for this project from another terminal/);
+  assert.match(hint[0], new RegExp(`\\(or terminate pid \\d+, e\\.g\\. ${
     process.platform === 'win32' ? 'taskkill /F /PID \\d+' : 'kill \\d+'}\\)\\.$`));
   assert.doesNotMatch(st.stdout, /--watch-clear/);
 });
@@ -1416,4 +1418,209 @@ test('H-14 [regression]: re-pointing a link behind a DROPPED verdict invalidates
     `the cwd link update was not reflected because an old dropped verdict was reused\n${w.state.stdout}\n${w.state.stderr}`);
   await forceStop(w);
   assertMatchesSingleRun({ home, project, out }, base, ['-cx', '--out', out]);
+});
+
+// ---------------------------------------------------------------------------
+// K. Whole-cycle skip (CycleSkipState in src/index.ts)
+//
+// A cycle whose inputs and outputs are exactly as the last successful cycle
+// left them stops before rendering. Every input that shapes the output must
+// break the skip: a log change, a hand-edited or deleted output, a config change.
+// ---------------------------------------------------------------------------
+
+const SKIP_LINE = /No input or output changes since the last cycle; skipped rendering\./;
+
+function skippedCycles(stdout) {
+  return (stdout.match(new RegExp(SKIP_LINE.source, 'g')) ?? []).length;
+}
+
+test('K-1: quiet cycles skip rendering and the output still matches a single run', async (t) => {
+  const s = scaffold(t, { codex: true, interval: 1 });
+  const w = startWatch([s.project, '--watch=4s', '--verbose'], s.home);
+  const st = await w.exited;
+  assert.equal(st.code, 0, st.stderr);
+  const dones = cycleLines(st.stdout);
+  assert.ok(dones.length >= 3, st.stdout);
+  assert.equal(skippedCycles(st.stdout), dones.length - 1, 'every cycle after the first is skipped');
+  // A skipped cycle still reports its files as noop and its pair count.
+  assert.ok(dones.slice(1).every(l => /, 2 pair\(s\), noop, /.test(l)), dones.join('\n'));
+  assert.match(st.stdout, /^ {2}writes: 1 create, 0 append, 0 rewrite, [1-9]\d* noop$/m);
+  assertMatchesSingleRun(s, null);
+});
+
+test('K-2: a log change, a deleted output and a config change each end the skip', async (t) => {
+  const s = scaffold(t, { interval: 1 });
+  const md = path.join(s.out, 'ccxlog.md');
+  const w = startWatch([s.project, '--watch', '--verbose'], s.home);
+  assert.ok(await waitFor(() => skippedCycles(w.state.stdout) >= 1), w.state.stdout + w.state.stderr);
+
+  // 1. The log grows: the next cycle renders and appends.
+  fs.appendFileSync(claudeSessionPath(s),
+    claudeQA(s.project, { q: 'Second question', a: 'Second answer', uuid: 'u2' })
+      .map(r => JSON.stringify(r)).join('\n') + '\n');
+  assert.ok(await waitFor(() => fs.readFileSync(md, 'utf-8').includes('Second answer')), w.state.stdout);
+
+  // 2. The output is deleted by hand: it is rebuilt.
+  let before = skippedCycles(w.state.stdout);
+  assert.ok(await waitFor(() => skippedCycles(w.state.stdout) > before), w.state.stdout);
+  fs.rmSync(md);
+  assert.ok(await waitFor(() => fs.existsSync(md)), 'the deleted output is written again');
+
+  // 3. The config changes (here: the template), which changes the rendering.
+  before = skippedCycles(w.state.stdout);
+  assert.ok(await waitFor(() => skippedCycles(w.state.stdout) > before), w.state.stdout);
+  // (Under templates/, out of the way of the top-level Markdown the test compares.)
+  fs.mkdirSync(path.join(s.out, 'templates'), { recursive: true });
+  fs.writeFileSync(path.join(s.out, 'templates', 'plain.md'), '## Q: %Question%\n\n%Source%\n\n%Answer%\n\n', 'utf-8');
+  fs.writeFileSync(path.join(s.out, 'ccxlog.config.json'),
+    JSON.stringify({ watchIntervalSeconds: 1, template: 'templates/plain.md' }), 'utf-8');
+  assert.ok(await waitFor(() => fs.existsSync(md) && fs.readFileSync(md, 'utf-8').includes('## Q: Second question')),
+    w.state.stdout + w.state.stderr);
+
+  await forceStop(w);
+  assertMatchesSingleRun(s, null);
+});
+
+// ---------------------------------------------------------------------------
+// S. --stop / --stop-all (src/lib/stop.ts)
+// ---------------------------------------------------------------------------
+
+function registryFiles(home) {
+  const dir = path.join(home, '.ccxlog', 'watches');
+  return fs.existsSync(dir) ? fs.readdirSync(dir).filter(n => n.endsWith('.json')) : [];
+}
+
+function deadPid() {
+  return spawnSync(process.execPath, ['-e', '0']).pid;
+}
+
+function thisEnv() {
+  return process.platform === 'linux' && process.env.WSL_DISTRO_NAME
+    ? `wsl:${process.env.WSL_DISTRO_NAME}` : process.platform;
+}
+
+test('S-1: --stop and --stop-all parse as standalone actions', () => {
+  const ok = parseArgs(['node', 'ccxlog', '--stop']);
+  assert.equal(ok.kind, 'ok');
+  assert.equal(ok.opts.stop, true);
+  assert.equal(parseArgs(['node', 'ccxlog', '--stop-all']).opts.stopAll, true);
+  for (const [args, re] of [
+    [['--watch', '--stop'], /--watch cannot be combined with --stop/],
+    [['--stop', '--stop-all'], /mutually exclusive/],
+    [['--stop', '--backup-md'], /mutually exclusive/],
+    [['--stop', '--dry-run'], /--stop cannot be combined with --dry-run/],
+    [['--stop-all', '--lock'], /--stop-all cannot be combined with --lock/],
+    [['--stop-all', 'some/project'], /--stop-all stops every watch/],
+    [['--stop-all', '--out', 'x'], /--stop-all stops every watch/],
+    [['--per-session', '--stop'], /--per-session cannot be combined with --stop/],
+  ]) {
+    const r = parseArgs(['node', 'ccxlog', ...args]);
+    assert.equal(r.kind, 'error', args.join(' '));
+    assert.match(r.msg, re, args.join(' '));
+  }
+});
+
+test('S-2: --stop with nothing running says so and succeeds', (t) => {
+  const s = scaffold(t);
+  const r = runCli([s.project, '--stop'], { home: s.home });
+  assert.equal(r.code, 0, r.stderr);
+  assert.match(r.stdout, /No ccxlog is running for /);
+});
+
+test('S-3: --stop asks a running watch to stop; it shuts down gracefully and cleans up', async (t) => {
+  const s = scaffold(t, { interval: 1 });
+  const w = startWatch([s.project, '--watch'], s.home);
+  assert.ok(await waitChangedCycle(w), w.state.stdout + w.state.stderr);
+  assert.equal(registryFiles(s.home).length, 1, 'a running watch is registered');
+  const r = runCli([s.project, '--stop'], { home: s.home });
+  assert.equal(r.code, 0, r.stderr + r.stdout);
+  assert.match(r.stdout, /Asking ccxlog \(pid \d+ on .+\) to stop/);
+  assert.match(r.stdout, /Stopped ccxlog/);
+  const st = await w.exited;
+  assert.equal(st.code, 0, st.stderr);
+  assert.match(st.stdout, /^ccxlog watch stopped \(stop requested \(ccxlog --stop\)\)/m);
+  assert.equal(fs.existsSync(path.join(s.out, '.ccxlog.lock')), false);
+  assert.equal(fs.existsSync(path.join(s.out, '.ccxlog.stop')), false);
+  assert.equal(registryFiles(s.home).length, 0, 'the watch unregisters on exit');
+});
+
+test('S-4: --stop-all stops every watch registered in this environment', async (t) => {
+  const a = scaffold(t, { interval: 1 });
+  const bProject = path.join(a.home, 'other');
+  fs.mkdirSync(bProject, { recursive: true });
+  writeClaudeSession(a.home, bProject, 'sess1.jsonl', claudeQA(bProject));
+  const wa = startWatch([a.project, '--watch'], a.home);
+  const wb = startWatch([bProject, '--watch'], a.home);
+  assert.ok(await waitChangedCycle(wa), wa.state.stdout + wa.state.stderr);
+  assert.ok(await waitChangedCycle(wb), wb.state.stdout + wb.state.stderr);
+  assert.equal(registryFiles(a.home).length, 2);
+  const r = runCli(['--stop-all'], { home: a.home });
+  assert.equal(r.code, 0, r.stderr + r.stdout);
+  assert.match(r.stdout, /Stopping 2 ccxlog watch\(es\)/);
+  const [sa, sb] = await Promise.all([wa.exited, wb.exited]);
+  assert.equal(sa.code, 0, sa.stderr);
+  assert.equal(sb.code, 0, sb.stderr);
+  assert.equal(registryFiles(a.home).length, 0);
+  const again = runCli(['--stop-all'], { home: a.home });
+  assert.equal(again.code, 0, again.stderr);
+  assert.match(again.stdout, /No running ccxlog watch is registered in this environment/);
+});
+
+test('S-5: stale locks — removed when they name this environment, left alone otherwise', (t) => {
+  const s = scaffold(t);
+  const lock = path.join(s.out, '.ccxlog.lock');
+  const base = {
+    host: os.hostname(), pid: deadPid(), token: 'b'.repeat(24),
+    acquiredAt: '2026-08-01T00:00:00.000Z', startedAt: '2026-08-01T00:00:00.000Z',
+  };
+
+  // This environment, holder gone: removed.
+  fs.writeFileSync(lock, JSON.stringify({ ...base, env: thisEnv(), stoppable: true }));
+  let r = runCli([s.project, '--stop'], { home: s.home });
+  assert.equal(r.code, 0, r.stderr + r.stdout);
+  assert.match(r.stdout, /Removed a stale lock/);
+  assert.equal(fs.existsSync(lock), false);
+
+  // A lock from before v1.12.0 names no runtime (it may be WSL seen from
+  // Windows): left in place, with the manual route.
+  fs.writeFileSync(lock, JSON.stringify(base));
+  r = runCli([s.project, '--stop'], { home: s.home });
+  assert.equal(r.code, 1, r.stdout);
+  assert.match(r.stderr, /ccxlog --lock --force-unlock/);
+  assert.equal(fs.existsSync(lock), true);
+
+  // Another host, unable to take a request: left in place.
+  fs.writeFileSync(lock, JSON.stringify({ ...base, host: 'OTHER-HOST', env: thisEnv() }));
+  r = runCli([s.project, '--stop'], { home: s.home });
+  assert.equal(r.code, 1, r.stdout);
+  assert.match(r.stderr, /in another environment/);
+  assert.equal(fs.existsSync(lock), true);
+});
+
+test('S-6: a request to a watch in another environment that does not answer times out cleanly', (t) => {
+  const s = scaffold(t);
+  const lock = path.join(s.out, '.ccxlog.lock');
+  fs.writeFileSync(lock, JSON.stringify({
+    host: 'OTHER-HOST', env: 'linux', pid: 4242, token: 'c'.repeat(24), stoppable: true,
+    acquiredAt: '2026-08-01T00:00:00.000Z', startedAt: '2026-08-01T00:00:00.000Z',
+  }));
+  const r = runCli([s.project, '--stop'], { home: s.home, env: { CCXLOG_STOP_TIMEOUT_MS: '600' } });
+  assert.equal(r.code, 1, r.stdout);
+  assert.match(r.stderr, /did not stop within .*run ccxlog --stop there/);
+  assert.equal(fs.existsSync(lock), true, 'a foreign lock is never removed');
+  assert.equal(fs.existsSync(path.join(s.out, '.ccxlog.stop')), false, 'the unanswered request is withdrawn');
+});
+
+test('S-7: --stop-all prunes entries whose watch is gone', (t) => {
+  const s = scaffold(t);
+  const dir = path.join(s.home, '.ccxlog', 'watches');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'gone.json'), JSON.stringify({
+    host: os.hostname(), env: thisEnv(), pid: deadPid(), outDir: s.out, projectPath: s.project,
+    token: null, startedAt: '2026-08-01T00:00:00.000Z',
+  }));
+  const r = runCli(['--stop-all'], { home: s.home });
+  assert.equal(r.code, 0, r.stderr + r.stdout);
+  assert.match(r.stdout, /Removed a stale entry/);
+  assert.equal(registryFiles(s.home).length, 0);
 });

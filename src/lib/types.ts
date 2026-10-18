@@ -209,4 +209,8 @@ export interface CliOptions {
   // `watchDurationSeconds` is the run duration D (null means unlimited).
   watch: boolean;
   watchDurationSeconds: number | null;
+  // Stop the watch holding <out>'s lock (--stop), or every watch registered in
+  // this environment (--stop-all).
+  stop: boolean;
+  stopAll: boolean;
 }
