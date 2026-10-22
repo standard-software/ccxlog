@@ -2,11 +2,11 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { CcxlogConfig } from '../../lib/config.js';
 import { encodeCwd, getClaudeProjectsDir, sha256HexBytes, canonicalPathString, canonicalPath, isPathWithin, buildRelativeId } from '../../lib/pathUtils.js';
-import type { SourceAdapter, RootRef, DiscoveredFile, SessionData, FilterContext } from '../adapter.js';
+import type { SourceAdapter, RootRef, DiscoveredFile, SessionData, FilterContext, ReadResume } from '../adapter.js';
 import { applyProgressRetention } from '../../lib/progressData.js';
+import type { Pair } from '../../lib/types.js';
 import { forEachLine } from '../../lib/lineStream.js';
-import { readJsonl } from './jsonlReader.js';
-import { buildPairsSplit, extractSessionName } from './pairBuilder.js';
+import { readClaudeSession, type ClaudeReadState } from './jsonlReader.js';
 
 function sessionIdFor(rootDir: string, filePath: string): string {
   const rel = path.relative(rootDir, filePath).replace(/\.jsonl$/, '');
@@ -131,29 +131,38 @@ export const claudeAdapter: SourceAdapter = {
   },
 
 
-  async readSession(file: DiscoveredFile, cfg: CcxlogConfig): Promise<SessionData> {
-    const r = await readJsonl(file.filePath);
+  async readSession(file: DiscoveredFile, cfg: CcxlogConfig, resume?: ReadResume): Promise<SessionData> {
     // Both conversations are ALWAYS built, whatever `includeSubagents` says: the
     // display filter runs much later, on UnifiedPairs (spec §8 step 7). Parsing
     // is where the two streams are told apart, and nowhere else — see
     // buildPairsSplit() for why they are not built as one interleaved stream.
-    const split = buildPairsSplit(r.entries);
-    const all = [...split.main, ...split.subagent];
-    // A transcript under `<session id>/subagents/` is a subagent conversation in
-    // its entirety, whether or not its records carry `isSidechain` (spec §4.2,
-    // §6.1). The directory is the authority there; the flag is the authority
-    // inside an ordinary session log.
-    if (file.subagentDir) for (const p of all) p.isSubagent = true;
-    // Progress data is discarded AFTER buildPairs() — that is, after
-    // slash-command bodies have been recovered (see the rationale in
-    // lib/progressData.ts).
-    const pairs = applyProgressRetention(all, cfg);
+    //
+    // The per-pair finishing steps go in `prepare`, which the reader applies
+    // once to every pair, whether it was just parsed or is a closed pair kept
+    // from an earlier read (jsonlReader.ts).
+    const prepare = (pairs: Pair[]): void => {
+      // A transcript under `<session id>/subagents/` is a subagent conversation
+      // in its entirety, whether or not its records carry `isSidechain` (spec
+      // §4.2, §6.1). The directory is the authority there; the flag is the
+      // authority inside an ordinary session log.
+      if (file.subagentDir) for (const p of pairs) p.isSubagent = true;
+      // Progress data is discarded AFTER the pairs are built — that is, after
+      // slash-command bodies have been recovered (see the rationale in
+      // lib/progressData.ts).
+      applyProgressRetention(pairs, cfg);
+    };
+    const { read: r, state } = await readClaudeSession(file.filePath, prepare, resume?.state as ClaudeReadState | undefined);
+    if (resume) {
+      resume.state = state;
+      resume.resumed = r.resumed;
+    }
+    const pairs = [...r.main, ...r.subagent];
     return {
       source: 'claude',
       // Claude session id is ALWAYS path-based (log-internal sessionId would
       // collide between a main session and its subagent).
       sessionId: sessionIdFor(file.root.dir, file.filePath),
-      sessionName: extractSessionName(r.entries),
+      sessionName: r.sessionName,
       sessionCwd: '',
       jsonlPath: file.filePath,
       sourceFileRelativeId: buildRelativeId('claude', file.root.origin, file.root.stableRootKey, file.root.dir, file.filePath),

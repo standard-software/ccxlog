@@ -29,6 +29,45 @@ import { StringDecoder } from 'node:string_decoder';
 // would let a future change here silently move the boundary the test exercises.
 export const READ_CHUNK_BYTES = 8 * 1024 * 1024;
 
+// Stream the lines of a file starting at byte offset `start` (which must be 0
+// or just past a newline), for readers that resume where they left off. Each
+// line is reported with `complete`: true when its newline was read, false for
+// an unterminated last line (a line still being written). The return value is
+// the byte offset just past the last newline read — the point a later call can
+// resume from without re-reading or splitting a line.
+//
+// Lines are cut on the newline BYTE before decoding. 0x0A never occurs inside
+// a multi-byte UTF-8 sequence, so every cut is also a character boundary and
+// decoding each line on its own yields exactly what forEachLine()'s streaming
+// decoder yields for the same bytes. That equivalence is what lets a resumed
+// read and a read from the top produce the same lines.
+export async function forEachLineFrom(
+  filePath: string,
+  start: number,
+  onLine: (line: string, complete: boolean) => void,
+): Promise<number> {
+  let rest: Buffer = Buffer.alloc(0);
+  let end = start;
+  await new Promise<void>((resolve, reject) => {
+    const stream = createReadStream(filePath, { start, highWaterMark: READ_CHUNK_BYTES });
+    stream.on('data', (chunk: string | Buffer) => {
+      const b: Buffer = typeof chunk === 'string' ? Buffer.from(chunk) : chunk;
+      const buf = rest.length > 0 ? Buffer.concat([rest, b]) : b;
+      const nl = buf.lastIndexOf(0x0a);
+      if (nl === -1) { rest = buf; return; }   // no complete line yet
+      rest = buf.subarray(nl + 1);
+      end += nl + 1;
+      for (const part of buf.toString('utf8', 0, nl).split('\n')) onLine(part, true);
+    });
+    stream.on('end', () => {
+      if (rest.length > 0) onLine(rest.toString('utf8'), false);
+      resolve();
+    });
+    stream.on('error', reject);
+  });
+  return end;
+}
+
 // Reading stops and the promise resolves as soon as `onLine` returns false
 // (used by the Codex prefilter's early return). Existing callers that return
 // void (undefined) still process every line.

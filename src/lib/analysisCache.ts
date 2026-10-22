@@ -51,6 +51,15 @@
 // caching it would buy nothing, and extra decision inputs would only widen the
 // surface the invariant has to be verified across.
 //
+// Separately from the entries, the cache keeps each adapter's resume state (see
+// ReadResume in sources/adapter.ts): what lets a file that DID change be read
+// from where the last read stopped rather than from the top. It is not an
+// analysis result and is never served as one; the adapter validates it against
+// the file itself before using it. Because it can hold raw entries (the open
+// end of a conversation), it is kept only for files written recently —
+// RESUME_IDLE_MS — which are the ones a watch will see change again soon. A
+// file quiet for longer costs one read from the top when it next changes.
+//
 // Nothing is persisted to disk; the cache dies with the process. Memory is kept
 // on par with what a single run already builds: one Map is reused across
 // cycles, a re-read file overwrites its entry in place (releasing the old
@@ -59,6 +68,9 @@
 import { fileSnapshot, pathDepsUnchanged, sameSnapshot } from './pathUtils.js';
 import type { PathDep } from './pathUtils.js';
 import type { DiscoveredFile, SessionData } from '../sources/adapter.js';
+
+// How long a resume state is kept after its file was last written.
+export const RESUME_IDLE_MS = 30 * 60 * 1000;
 
 export interface AnalysisCacheStats {
   /** Discovered files re-scanned and fully re-parsed this cycle (cache miss). */
@@ -125,7 +137,17 @@ export interface AnalysisCache {
    * unchanged cycle adds no stat calls.
    */
   set(key: string, file: DiscoveredFile, entry: CachedEntry): Promise<void>;
-  /** End of a cycle: delete entries for files that were not discovered this time. */
+  /** The resume state stored for this file, if it was read from the same root. */
+  resumeState(key: string, file: DiscoveredFile): unknown;
+  /**
+   * Store the state a read left behind (undefined forgets it). Kept only when
+   * the file was written within RESUME_IDLE_MS.
+   */
+  keepResumeState(key: string, file: DiscoveredFile, state: unknown): void;
+  /**
+   * End of a cycle: delete entries for files that were not discovered this
+   * time, and resume states for files that were not or have gone quiet.
+   */
   endCycle(): void;
   stats(): AnalysisCacheStats;
 }
@@ -144,6 +166,7 @@ function rootKeyOf(file: DiscoveredFile): string {
 
 export function createAnalysisCache(): AnalysisCache {
   const entries = new Map<string, CachedFile>();
+  const resumes = new Map<string, { state: unknown; rootKey: string; writtenAtMs: number }>();
   let fingerprint: string | null = null;
   let seen = new Set<string>();
   let reparsed = 0;
@@ -157,7 +180,12 @@ export function createAnalysisCache(): AnalysisCache {
     },
 
     useFingerprint(next: string): void {
-      if (fingerprint !== null && fingerprint !== next) entries.clear();
+      if (fingerprint !== null && fingerprint !== next) {
+        entries.clear();
+        // The premises shape what a reader keeps too (Progress retention, for
+        // one), so a state from before the change is not resumed from.
+        resumes.clear();
+      }
       fingerprint = next;
     },
 
@@ -198,9 +226,27 @@ export function createAnalysisCache(): AnalysisCache {
       entries.set(key, { ...entry, snapshot: file.snapshot, rootKey: rootKeyOf(file) });
     },
 
+    resumeState(key: string, file: DiscoveredFile): unknown {
+      const r = resumes.get(key);
+      return r !== undefined && r.rootKey === rootKeyOf(file) ? r.state : undefined;
+    },
+
+    keepResumeState(key: string, file: DiscoveredFile, state: unknown): void {
+      const writtenAtMs = file.snapshot?.mtimeMs;
+      if (state === undefined || writtenAtMs === undefined || Date.now() - writtenAtMs > RESUME_IDLE_MS) {
+        resumes.delete(key);
+        return;
+      }
+      resumes.set(key, { state, rootKey: rootKeyOf(file), writtenAtMs });
+    },
+
     endCycle(): void {
       for (const key of entries.keys()) {
         if (!seen.has(key)) entries.delete(key);
+      }
+      const now = Date.now();
+      for (const [key, r] of resumes) {
+        if (!seen.has(key) || now - r.writtenAtMs > RESUME_IDLE_MS) resumes.delete(key);
       }
     },
 

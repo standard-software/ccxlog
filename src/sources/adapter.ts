@@ -55,6 +55,16 @@ export interface SessionData {
   thread?: ThreadIdentity;
 }
 
+// Carried across --watch cycles for one file so a reader can pick up where it
+// stopped instead of reading from the top (the analysis cache keeps it). The
+// state is opaque to everyone but the adapter that wrote it, and an adapter is
+// free to ignore it: `state` left undefined just means "read from the top next
+// time". `resumed` reports whether this read actually resumed (--verbose).
+export interface ReadResume {
+  state: unknown;
+  resumed?: boolean;
+}
+
 export interface FilterContext {
   projectPath: string;
   wantedCwds: Set<string>;           // canonical cwds ({project} ∪ extraCwds)
@@ -107,7 +117,10 @@ export interface SourceAdapter {
     cfg: CcxlogConfig,
     ctx: FilterContext,
   ): Promise<PrefilterResult>;
-  readSession(file: DiscoveredFile, cfg: CcxlogConfig): Promise<SessionData>;
+  // `resume` is passed under --watch only. Claude uses it to read just the lines
+  // appended since the last read (sources/claude/jsonlReader.ts); Codex ignores
+  // it and always reads from the top.
+  readSession(file: DiscoveredFile, cfg: CcxlogConfig, resume?: ReadResume): Promise<SessionData>;
   // Optional mutable metadata pass. It runs every cycle after cached session
   // parsing, so metadata stored outside a rollout can change without forcing
   // the rollout itself through the parser again.

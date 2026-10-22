@@ -1137,6 +1137,30 @@ test('H-4 [regression]: an appended file is reparsed and still matches a single 
   assertMatchesSingleRun(s, base);
 });
 
+test('H-15: a growing Claude log is read only from where the last read stopped, and still matches a single run', async (t) => {
+  const s = scaffold(t, { interval: 1 });
+  const jsonl = path.join(s.home, '.claude', 'projects',
+    fs.readdirSync(path.join(s.home, '.claude', 'projects'))[0], 'sess1.jsonl');
+  const w = startWatch([s.project, '--watch', '--verbose'], s.home);
+  const agg = path.join(s.out, 'ccxlog.md');
+  assert.ok(await waitFor(() => fs.existsSync(agg) && countPairs(agg) === 1, 20000), w.state.stdout + w.state.stderr);
+  const base = snapshotMd(s.out);
+
+  // An answer arrives in two writes, the first one ending mid-line.
+  const q2 = claudeQA(s.project, { q: 'Second question', a: 'Second answer', uuid: 'u2', ts: '2026-05-27T11:05:49.000Z' })
+    .map(r => JSON.stringify(r)).join('\n') + '\n';
+  const half = Math.floor(q2.length / 2);
+  fs.appendFileSync(jsonl, q2.slice(0, half), 'utf-8');
+  assert.ok(await waitFor(() => /read from where the last read stopped/.test(w.state.stdout), 20000),
+    `the append was not read incrementally\n${w.state.stdout}\n${w.state.stderr}`);
+  fs.appendFileSync(jsonl, q2.slice(half), 'utf-8');
+  // The half may already have carried the whole question, so wait for the answer.
+  assert.ok(await waitFor(() => fs.readFileSync(agg, 'utf-8').includes('Second answer'), 20000),
+    w.state.stdout + w.state.stderr);
+  await forceStop(w);
+  assertMatchesSingleRun(s, base);
+});
+
 
 test('H-5 [regression]: a removed file leaves the cache and the output, matching a single run', async (t) => {
   const s = scaffold(t, { interval: 1 });
@@ -1623,4 +1647,37 @@ test('S-7: --stop-all prunes entries whose watch is gone', (t) => {
   assert.equal(r.code, 0, r.stderr + r.stdout);
   assert.match(r.stdout, /Removed a stale entry/);
   assert.equal(registryFiles(s.home).length, 0);
+});
+
+test('K-3: a changing cycle reuses the unchanged archive, and an edited archive is compared in full', async (t) => {
+  const s = scaffold(t, { claude: false, interval: 1 });
+  // The test clock is 2026-01-01 12:00 (tools/run-tests.mjs), so with the
+  // default 8 days the first pair goes to the archive and the second does not.
+  const records = [
+    ...claudeQA(s.project, { q: 'Old question', a: 'Old answer', uuid: 'u1', ts: '2025-11-01T10:00:00.000Z' }),
+    ...claudeQA(s.project, { q: 'Recent question', a: 'Recent answer', uuid: 'u2', ts: '2026-01-01T01:00:00.000Z' }),
+  ];
+  writeClaudeSession(s.home, s.project, 'sess1.jsonl', records);
+  const jsonl = path.join(s.home, '.claude', 'projects',
+    fs.readdirSync(path.join(s.home, '.claude', 'projects'))[0], 'sess1.jsonl');
+  const env = { NODE_ENV: 'test', CCXLOG_TEST_NOW: '2026-01-01T12:00:00' };
+  const w = startWatch([s.project, '--watch', '--verbose'], s.home, ROOT, env);
+  const agg = path.join(s.out, 'ccxlog.md');
+  const archive = path.join(s.out, 'ccxlog_archive.md');
+  assert.ok(await waitFor(() => fs.existsSync(archive) && fs.existsSync(agg) && countPairs(agg) === 1, 20000),
+    w.state.stdout + w.state.stderr);
+  const base = snapshotMd(s.out);
+
+  // A new recent pair: the archive is reused, not re-read.
+  const added = claudeQA(s.project, { q: 'Next question', a: 'Next answer', uuid: 'u3', ts: '2026-01-01T02:00:00.000Z' });
+  fs.appendFileSync(jsonl, added.map(r => JSON.stringify(r)).join('\n') + '\n', 'utf-8');
+  assert.ok(await waitFor(() => countPairs(agg) === 2 && /Archive unchanged since the last cycle/.test(w.state.stdout), 20000),
+    `the archive was not reused\n${w.state.stdout}\n${w.state.stderr}`);
+
+  // An edit to the archive is noticed and repaired, as without the reuse.
+  fs.appendFileSync(archive, 'manual edit\n', 'utf-8');
+  assert.ok(await waitFor(() => !fs.readFileSync(archive, 'utf-8').includes('manual edit'), 20000),
+    `the edited archive was not rewritten\n${w.state.stdout}\n${w.state.stderr}`);
+  await forceStop(w);
+  assertMatchesSingleRun(s, base);
 });

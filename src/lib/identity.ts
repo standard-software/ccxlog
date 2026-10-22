@@ -248,6 +248,58 @@ export function isDestructive(
   return lostIds(oldContent, newContent, method, ignoreSinceMs, ignoreThroughMs).length > 0;
 }
 
+// A file parsed once and compared many times: the archive, when a watch cycle
+// finds it exactly as the last cycle left it (writeAggregate in index.ts).
+export interface SharedTail {
+  content: string;
+  parse: CcxlogIdParse;
+  idSet: Set<string>;
+  // The lines before its first marker. In `x + content` they belong to the
+  // block x ends with, which matters to blockTimes() for that block.
+  beforeFirstMarker: string;
+}
+
+export function sharedTail(content: string): SharedTail {
+  const parse = parseCcxlogId(content);
+  const beforeFirstMarker = parse.firstLineIndex < 0 ? content
+    : parse.firstLineIndex === 0 ? ''
+      : content.split('\n', parse.firstLineIndex).join('\n') + '\n';
+  return { content, parse, idSet: new Set(parse.ids), beforeFirstMarker };
+}
+
+/**
+ * Exactly `isDestructive(oldHead + tail, newHead + tail, method, …)` with
+ * `method = chooseMethod(oldHead + tail, newHead + tail).method`, without
+ * parsing `tail` again. Requires both heads to end at a line boundary (empty
+ * or ending in "\n"); returns null when they do not, and the caller then
+ * compares the full strings.
+ *
+ * Why it is the same answer: with the tail on both sides, every id in the tail
+ * is present in the new content, so only the heads' ids can be lost; validity
+ * and counts of the joined documents are those of the parts plus "no id in both
+ * a head and the tail"; and a head's last block reads its legacy time from the
+ * lines up to the tail's first marker, which is what `beforeFirstMarker` keeps.
+ */
+export function isDestructiveWithSharedTail(
+  oldHead: string,
+  newHead: string,
+  tail: SharedTail,
+  ignoreSinceMs?: number,
+  ignoreThroughMs?: number,
+): boolean | null {
+  const atBoundary = (s: string): boolean => s === '' || s.endsWith('\n');
+  if (!atBoundary(oldHead) || !atBoundary(newHead)) return null;
+  const po = parseCcxlogId(oldHead);
+  const pn = parseCcxlogId(newHead);
+  const t = tail.parse;
+  const joinedValid = (p: CcxlogIdParse): boolean => p.valid && t.valid && !p.ids.some(id => tail.idSet.has(id));
+  const method: BlockMethod = po.count + t.count > 0 && pn.count + t.count > 0 && joinedValid(po) && joinedValid(pn)
+    ? 'ccxlogid' : 'none';
+  if (method === 'none') return true;
+  return lostIds(oldHead + tail.beforeFirstMarker, newHead, method, ignoreSinceMs, ignoreThroughMs)
+    .some(id => !tail.idSet.has(id));
+}
+
 // The first non-empty line after each wanted id's marker, which is what makes a
 // lost block recognisable at a glance (the heading a template renders: date,
 // source, session). Nothing is assumed about that line's shape — templates are

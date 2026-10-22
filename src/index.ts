@@ -10,7 +10,10 @@ import {
   canonicalPath, canonicalPathString, clearCanonicalPathCache, fileIdentity, isPathWithin,
 } from './lib/pathUtils.js';
 import type { PathDep } from './lib/pathUtils.js';
-import { assignCcxids, safeSessionId, chooseMethod, isDestructive } from './lib/identity.js';
+import {
+  assignCcxids, safeSessionId, chooseMethod, isDestructive,
+  isDestructiveWithSharedTail, sharedTail, type SharedTail,
+} from './lib/identity.js';
 import { compareUnifiedPairs, dedupePairs, dedupeForkedSessions } from './lib/merge.js';
 import { hasBothProgress, templateHasSource, unknownPlaceholders } from './lib/templates.js';
 import { progressDataNeeded } from './lib/progressData.js';
@@ -59,7 +62,7 @@ import { createWarningReporter, type WarningReporter } from './lib/watchWarnings
 import { claudeAdapter } from './sources/claude/index.js';
 import { codexAdapter } from './sources/codex/index.js';
 import { legacySessionIds, removeInheritedHistory } from './sources/codex/inheritedHistory.js';
-import type { SourceAdapter, RootRef, DiscoveredFile, SessionData, FilterContext } from './sources/adapter.js';
+import type { SourceAdapter, RootRef, DiscoveredFile, SessionData, FilterContext, ReadResume } from './sources/adapter.js';
 import type { CliOptions, UnifiedPair, Source, SourceMode } from './lib/types.js';
 
 const PKG_VERSION = (createRequire(import.meta.url)('../package.json') as { version: string }).version;
@@ -302,6 +305,7 @@ interface AdapterRun {
   // Incremental re-parse breakdown (--verbose). The two always sum to files.length.
   reparsed: number;          // discovered files re-scanned and re-read (cache miss)
   reused: number;            // discovered files taken straight from last cycle
+  resumed: number;           // of the reparsed, those read only from where the last read stopped
   formatSkipped: string[];   // jsonl excluded for not being this source's format (--verbose)
   sessions: SessionData[];   // filtered (belongs); pairs may be empty
 }
@@ -355,10 +359,41 @@ export interface CycleSkipState {
   inputs: string | null;
   outputs: string | null;
   last: RunOutcome | null;
+  archive: ArchiveMemo | null;
 }
 
 export function createCycleSkipState(): CycleSkipState {
-  return { inputs: null, outputs: null, last: null };
+  return { inputs: null, outputs: null, last: null, archive: null };
+}
+
+// The archive as the last cycle left it on disk, for cycles that DO have to
+// render (a log changed). The archive holds everything older than recentDays,
+// so it is by far the larger file (26MB beside a 3MB recent file on one
+// project), yet an ongoing conversation never changes it. Comparing it as if it
+// might — read it twice, hash it twice, parse its ids for the loss check — cost
+// most of such a cycle. When this cycle's archive content is the remembered
+// content, and the file still has the size and mtime it was left with, all of
+// that is skipped: the archive is a noop and the loss check runs on the recent
+// file (isDestructiveWithSharedTail).
+//
+// Size and mtime are the same identity the quiet-cycle skip trusts for output
+// files (outputFilesKey). Anything else — another mode or out dir, a template or
+// recentDays change, a pair crossing into the archive, an edit or deletion —
+// changes the content or the stat, and the cycle compares in full.
+export interface ArchiveMemo {
+  filePath: string;
+  size: number;
+  mtimeMs: number;
+  tail: SharedTail;
+}
+
+async function sameStat(filePath: string, m: { size: number; mtimeMs: number }): Promise<boolean> {
+  try {
+    const st = await fs.stat(filePath);
+    return st.isFile() && st.size === m.size && st.mtimeMs === m.mtimeMs;
+  } catch {
+    return false;
+  }
 }
 
 function localDateKey(d: Date): string {
@@ -490,7 +525,11 @@ async function readAdapterSessions(
       continue;
     }
     ar.filesRead++;
-    const s = await ar.adapter.readSession(f, config);
+    // Under watch, a file that changed may be read from where the last read
+    // stopped (ReadResume); the adapter checks the state still fits the file.
+    const resume: ReadResume | undefined = cache ? { state: cache.resumeState(key, f) } : undefined;
+    const s = await ar.adapter.readSession(f, config, resume);
+    if (resume?.resumed) ar.resumed++;
     // A file containing not one record of this source's own format (another
     // source's log, or an unrelated jsonl) is excluded as a source mismatch
     // (§format detection, v1.5.0).
@@ -505,6 +544,8 @@ async function readAdapterSessions(
     await cache?.set(key, f, r.used
       ? { outcome: 'used', session: s }
       : { outcome: 'dropped', pathDeps: r.cwdDeps });
+    // Only a file that reaches the output is worth resuming.
+    cache?.keepResumeState(key, f, r.used ? resume?.state : undefined);
   }
   ar.sessions = kept;
 }
@@ -588,7 +629,7 @@ async function run(
     }
     checkRootNamespaces(roots, adapter.id, runErrors);
     adapterRuns.push({
-      adapter, roots, files: [], filesRead: 0, reparsed: 0, reused: 0,
+      adapter, roots, files: [], filesRead: 0, reparsed: 0, reused: 0, resumed: 0,
       formatSkipped: [], sessions: [],
     });
   }
@@ -776,7 +817,7 @@ async function run(
   // run() must not acquire it again because watch cycles run under that lock.
   const r = opts.perSession
     ? await writePerSession(opts, config, sessionUnified, mdBackupDir, out)
-    : await writeAggregate(opts, config, allPairs, sessionUnified, mdBackupDir, out);
+    : await writeAggregate(opts, config, allPairs, sessionUnified, mdBackupDir, out, skip);
   return remember({ ...r, intervalSeconds });
 }
 
@@ -787,6 +828,7 @@ async function writeAggregate(
   sessionUnified: SessionUnified[],
   mdBackupDir: string,
   out: OutputSink,
+  skip?: CycleSkipState,
 ): Promise<RunOutcome> {
   const backupNowMs = archiveNow().getTime();
   const backupIgnoreSinceMs = backupNowMs - config.autoBackupGraceMinutes * 60_000;
@@ -824,23 +866,59 @@ async function writeAggregate(
   const planned = await planWrite(filePath, content, 'aggregate');
   if (!planned.ok) { out.error(`Error: ${planned.error}`); return outcome({ code: EXIT_RUNTIME, failure: planned.error }); }
   const plan = planned.plan;
-
-  // Even when the new archive is empty, plan against an owned empty archive so
-  // its fingerprint and ownership are verified before deletion.
-  const archivePlanned = await planWrite(archivePath, archiveContent, 'aggregate');
-  if (!archivePlanned.ok) { out.error(`Error: ${archivePlanned.error}`); return outcome({ code: EXIT_RUNTIME, failure: archivePlanned.error }); }
-  const archivePlan = archivePlanned.plan;
   const archiveWanted = split.archive.length > 0;
 
+  // Watch only: reuse the archive exactly as the last cycle left it (see
+  // ArchiveMemo). The memo is cleared now and set again only once this cycle's
+  // archive is settled, so a cycle that stops early leaves none behind.
+  const memo = skip?.archive ?? null;
+  if (skip) skip.archive = null;
+  const reused = memo !== null && !opts.dryRun && archiveWanted
+    && memo.filePath === archivePath && memo.tail.content === archiveContent
+    && await sameStat(archivePath, memo)
+    ? memo : null;
+  if (reused) out.log(`Archive unchanged since the last cycle: ${archiveName} not re-read.`);
+
+  let archivePlan: WritePlan;
+  if (reused) {
+    archivePlan = {
+      filePath: archivePath, kind: 'aggregate', newContent: archiveContent, outcome: 'noop',
+      backupRequired: false, appendTail: '', backupReason: null,
+      fingerprint: { size: reused.size, mtimeMs: reused.mtimeMs, contentHash: '' },
+    };
+  } else {
+    // Even when the new archive is empty, plan against an owned empty archive so
+    // its fingerprint and ownership are verified before deletion.
+    const archivePlanned = await planWrite(archivePath, archiveContent, 'aggregate');
+    if (!archivePlanned.ok) { out.error(`Error: ${archivePlanned.error}`); return outcome({ code: EXIT_RUNTIME, failure: archivePlanned.error }); }
+    archivePlan = archivePlanned.plan;
+  }
+
   const readOld = async (p: WritePlan): Promise<string> => p.fingerprint === null ? '' : fs.readFile(p.filePath, 'utf-8');
-  const [oldRecent, oldArchive] = await Promise.all([readOld(plan), readOld(archivePlan)]);
-  const oldCombined = oldRecent + oldArchive;
-  const newCombined = content + (archiveWanted ? archiveContent : '');
-  const method = chooseMethod(oldCombined, newCombined).method;
-  const backupRequired = oldCombined !== '' && oldCombined !== newCombined
-    && isDestructive(oldCombined, newCombined, method, backupIgnoreSinceMs, backupNowMs);
-  const reason = backupRequired
-    ? describeLoss(oldCombined, newCombined, method, backupIgnoreSinceMs, backupNowMs) : null;
+  const [oldRecent, oldArchive] = await Promise.all([
+    readOld(plan),
+    reused ? reused.tail.content : readOld(archivePlan),
+  ]);
+  // With the archive the same on both sides, whether the set loses an id is
+  // decided from the recent file alone (isDestructiveWithSharedTail gives the
+  // same answer as the full comparison). Only a "nothing is lost" answer is
+  // taken from it; a loss, or a case it cannot decide, goes through the full
+  // comparison below, which also names what is lost for the backup record.
+  const quickVerdict = reused
+    ? (oldRecent === content ? false
+      : isDestructiveWithSharedTail(oldRecent, content, reused.tail, backupIgnoreSinceMs, backupNowMs))
+    : null;
+  let backupRequired = false;
+  let reason: BackupReason | null = null;
+  if (quickVerdict !== false) {
+    const oldCombined = oldRecent + oldArchive;
+    const newCombined = content + (archiveWanted ? archiveContent : '');
+    const method = chooseMethod(oldCombined, newCombined).method;
+    backupRequired = oldCombined !== '' && oldCombined !== newCombined
+      && isDestructive(oldCombined, newCombined, method, backupIgnoreSinceMs, backupNowMs);
+    reason = backupRequired
+      ? describeLoss(oldCombined, newCombined, method, backupIgnoreSinceMs, backupNowMs) : null;
+  }
 
   // The two Markdown files are one logical history. Back up both old members
   // only when an id disappears from their UNION, never for a normal move across
@@ -860,7 +938,11 @@ async function writeAggregate(
   // Verify the whole set before the first mutation. Creating/updating the
   // archive comes first so a crash can at worst leave duplicates, not a gap.
   for (const p of [plan, archivePlan]) {
-    if (!opts.dryRun && await fingerprintChanged(p.filePath, p.fingerprint)) {
+    if (opts.dryRun) continue;
+    const changed = reused && p === archivePlan
+      ? !(await sameStat(p.filePath, reused))
+      : await fingerprintChanged(p.filePath, p.fingerprint);
+    if (changed) {
       const msg = `${p.filePath} changed during aggregate-set planning; stopping on the safe side.`;
       out.error(`Error: ${msg}`);
       return outcome({ code: EXIT_RUNTIME, failure: msg });
@@ -869,7 +951,8 @@ async function writeAggregate(
 
   const commits: Array<Awaited<ReturnType<typeof commitExactPlan>>> = [];
   if (archiveWanted) {
-    commits.push(await commitExactPlan(archivePlan, opts.dryRun));
+    // A reused archive is a noop that was just re-checked above.
+    commits.push(reused ? { result: 'noop' } : await commitExactPlan(archivePlan, opts.dryRun));
     if (commits[0].error) { out.error(`Error: ${commits[0].error}`); return outcome({ code: EXIT_RUNTIME, failure: commits[0].error }); }
   }
   const recentCommit = await commitExactPlan(plan, opts.dryRun);
@@ -879,6 +962,22 @@ async function writeAggregate(
   if (!archiveWanted && archivePlan.fingerprint !== null) {
     if (!opts.dryRun) await fs.rm(archivePath);
     archiveDeleted = true;
+  }
+  if (skip && !opts.dryRun && archiveWanted) {
+    // Remember the archive only when what is on disk now is exactly this
+    // cycle's content. A noop or an append leaves the old header lines in
+    // place, which may differ from the new ones.
+    const result = commits[0].result;
+    const onDisk = reused || result === 'create' || result === 'rewrite' ? archiveContent
+      : result === 'append' ? oldArchive + archivePlan.appendTail
+        : oldArchive;
+    const st = onDisk === archiveContent ? await fs.stat(archivePath).catch(() => null) : null;
+    if (st) {
+      skip.archive = {
+        filePath: archivePath, size: st.size, mtimeMs: st.mtimeMs,
+        tail: reused ? reused.tail : sharedTail(archiveContent),
+      };
+    }
   }
 
   out.log(`Mode: aggregate (${aggName}) [${opts.mode}]`);
@@ -1301,6 +1400,7 @@ function printVerbose(
     out.log(`[${ar.adapter.id}] files: ${ar.files.length}, fully read: ${ar.filesRead}, sessions kept: ${ar.sessions.length}`
       // The breakdown is added only on a run where watch's incremental re-parse is active.
       + (cache ? `, reparsed: ${ar.reparsed}, reused: ${ar.reused}` : '')
+      + (ar.resumed > 0 ? ` (${ar.resumed} of the reparsed read from where the last read stopped)` : '')
       + (ar.formatSkipped.length > 0 ? `, format-skipped: ${ar.formatSkipped.length}` : ''));
     for (const f of ar.formatSkipped) out.log(`  skipped (not ${ar.adapter.id}-format): ${f}`);
   }

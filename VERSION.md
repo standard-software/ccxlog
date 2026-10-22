@@ -4,6 +4,19 @@
 
 ## Version
 
+### 1.13.0
+#### 2026/10/23(Fri)
+- `--watch` reads only the lines added to a Claude Code log since the last
+  cycle, instead of the whole log again. While a long session was being
+  written, every cycle re-read its log from the top: about 2.5 s a cycle for a
+  359 MB log. Reading the new lines now takes milliseconds. The output is the
+  same as reading the whole log; a log that cannot be shown to have only grown
+  is read from the top as before
+- in a `--watch` cycle where a log changed, an archive that is exactly as the
+  last cycle left it is no longer read, hashed and compared again. Together
+  with the change above, such a cycle on a project with a 26 MB archive went
+  from about 3.7 s to 0.7 s
+
 ### 1.12.0
 #### 2026/10/19(Mon)
 - `--watch` no longer re-renders when nothing has changed. A cycle in which

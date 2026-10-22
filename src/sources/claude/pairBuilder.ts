@@ -72,19 +72,22 @@ function belongsToCurrentQuestion(e: UserEntry, current: Pair): boolean {
 // The human-readable session name Claude Code shows in its resume list.
 // Custom title wins over AI title; the last value of each wins.
 export function extractSessionName(entries: LogEntry[]): string {
-  let aiTitle = '';
-  let customTitle = '';
-  for (const e of entries) {
-    if (!e || typeof e !== 'object') continue;
-    if (e.type === 'custom-title') {
-      const v = (e as { customTitle?: unknown }).customTitle;
-      if (typeof v === 'string' && v.trim() !== '') customTitle = v;
-    } else if (e.type === 'ai-title') {
-      const v = (e as { aiTitle?: unknown }).aiTitle;
-      if (typeof v === 'string' && v.trim() !== '') aiTitle = v;
-    }
+  const titles = { aiTitle: '', customTitle: '' };
+  for (const e of entries) noteSessionTitle(titles, e);
+  return titles.customTitle || titles.aiTitle;
+}
+
+// One entry's contribution to extractSessionName(), for readers that see the
+// entries a few at a time.
+export function noteSessionTitle(titles: { aiTitle: string; customTitle: string }, e: LogEntry): void {
+  if (!e || typeof e !== 'object') return;
+  if (e.type === 'custom-title') {
+    const v = (e as { customTitle?: unknown }).customTitle;
+    if (typeof v === 'string' && v.trim() !== '') titles.customTitle = v;
+  } else if (e.type === 'ai-title') {
+    const v = (e as { aiTitle?: unknown }).aiTitle;
+    if (typeof v === 'string' && v.trim() !== '') titles.aiTitle = v;
   }
-  return customTitle || aiTitle;
 }
 
 const COMMAND_NAME_RE = /<command-name>\s*\/?([^<\s]+)\s*<\/command-name>/;
@@ -122,6 +125,11 @@ function commandFileContent(pair: Pair, name: string): string | null {
 
 // Restore slash-command bodies Claude Code truncated in the log: replace a
 // stored body that is a strict, shorter prefix of the command file's text.
+//
+// The entry is replaced by a copy, never edited in place. The parsed entries
+// may be kept and built into pairs again on a later cycle (the resumable reader
+// in jsonlReader.ts); an entry already carrying the recovered body would no
+// longer look truncated, and recovery would then pick a different entry.
 export function recoverSlashCommandBodies(pairs: Pair[]): void {
   for (const pair of pairs) {
     const name = slashCommandName(pair);
@@ -129,12 +137,14 @@ export function recoverSlashCommandBodies(pairs: Pair[]): void {
     const full = commandFileContent(pair, name);
     if (!full) continue;
     const fullKey = full.replace(/\s+$/g, '');
-    for (const extra of pair.additionalQuestionEntries) {
+    const extras = pair.additionalQuestionEntries;
+    for (let i = 0; i < extras.length; i++) {
+      const extra = extras[i];
       const t = getContentText(extra.message?.content ?? '');
       if (!t) continue;
       const tKey = t.replace(/\s+$/g, '');
       if (tKey.length < fullKey.length && fullKey.startsWith(tKey)) {
-        extra.message.content = full;
+        extras[i] = { ...extra, message: { ...extra.message, content: full } };
         break;
       }
     }
@@ -188,10 +198,29 @@ export function buildPairs(entries: LogEntry[], options: BuildPairsOptions = {})
 }
 
 function buildStream(entries: LogEntry[]): Pair[] {
+  return buildStreamOpen(entries).pairs;
+}
+
+/**
+ * Build one stream's pairs, and report where the LAST pair began: `openFrom`
+ * is the index of the entry that opened it (`entries.length` when no pair was
+ * opened at all).
+ *
+ * Only the last pair can still change as entries are appended. Every earlier
+ * one was closed when its successor opened, and nothing after that point reads
+ * or alters it (slash-command recovery looks at each pair's own entries only).
+ * So a reader that keeps the closed pairs and the entries from `openFrom` on
+ * can append new entries and rebuild just that tail: the building below starts
+ * every pair from `current === null`, which is exactly the state the full
+ * build was in when the opening entry arrived.
+ */
+export function buildStreamOpen(entries: LogEntry[]): { pairs: Pair[]; openFrom: number } {
   const pairs: Pair[] = [];
   let current: Pair | null = null;
+  let openFrom = entries.length;
 
-  for (const e of entries) {
+  for (let i = 0; i < entries.length; i++) {
+    const e = entries[i];
     if (!e || typeof e !== 'object') continue;
 
     const queued = asQueuedPromptUser(e);
@@ -201,6 +230,7 @@ function buildStream(entries: LogEntry[]): Pair[] {
         current = null;
       }
       if (current === null) {
+        openFrom = i;
         current = {
           questionEntry: queued,
           additionalQuestionEntries: [],
@@ -241,6 +271,7 @@ function buildStream(entries: LogEntry[]): Pair[] {
       }
 
       if (current === null) {
+        openFrom = i;
         current = {
           questionEntry: e,
           additionalQuestionEntries: [],
@@ -253,6 +284,7 @@ function buildStream(entries: LogEntry[]): Pair[] {
         // pair with no answer, then start the new pair (v1.4.0 R1). This holds
         // repeatedly across an A->B->C run of cancellations.
         pairs.push(current);
+        openFrom = i;
         current = {
           questionEntry: e,
           additionalQuestionEntries: [],
@@ -277,5 +309,5 @@ function buildStream(entries: LogEntry[]): Pair[] {
 
   if (current) pairs.push(current);
   recoverSlashCommandBodies(pairs);
-  return pairs;
+  return { pairs, openFrom };
 }

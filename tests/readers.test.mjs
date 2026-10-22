@@ -4,8 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { readJsonl as readCodex } from '../dist/sources/codex/jsonlReader.js';
 import { buildPairs as buildCodexPairs } from '../dist/sources/codex/pairBuilder.js';
-import { readJsonl as readClaude } from '../dist/sources/claude/jsonlReader.js';
-import { buildPairs as buildClaudePairs } from '../dist/sources/claude/pairBuilder.js';
+import { readClaudeSession } from '../dist/sources/claude/jsonlReader.js';
 import { extractTokenTotals } from '../dist/lib/metaExtractor.js';
 import { mkTmp, rmrf, writeJsonl } from './helpers.mjs';
 
@@ -403,10 +402,11 @@ test('claude: sidechain pairs are excluded by default, malformed lines skipped',
       JSON.stringify({ type: 'user', uuid: 'u2', parentUuid: null, isSidechain: true, timestamp: '2026-05-27T11:00:02Z', message: { role: 'user', content: 'Sidechain Q' } }),
       JSON.stringify({ type: 'assistant', uuid: 'a2', parentUuid: 'u2', isSidechain: true, timestamp: '2026-05-27T11:00:03Z', message: { role: 'assistant', model: 'claude', content: [{ type: 'text', text: 'Sidechain A' }] } }),
     ].join('\n') + '\n', 'utf-8');
-    const { entries, skippedLines } = await readClaude(file);
-    assert.equal(skippedLines, 1);
-    const pairs = buildClaudePairs(entries, { includeSidechain: false });
-    assert.equal(pairs.length, 1);
-    assert.equal(pairs[0].questionEntry.message.content, 'Main Q');
+    const { read } = await readClaudeSession(file, () => {});
+    assert.equal(read.skippedLines, 1);
+    assert.equal(read.main.length, 1);
+    assert.equal(read.main[0].questionEntry.message.content, 'Main Q');
+    assert.equal(read.subagent.length, 1);
+    assert.equal(read.subagent[0].isSubagent, true);
   } finally { rmrf(dir); }
 });

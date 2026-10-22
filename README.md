@@ -169,6 +169,16 @@ belongs to another project" verdict is remembered the same way. Files that
 changed are re-read, new files are read, and files that are no longer discovered
 are dropped from memory.
 
+A Claude Code log that grew is not read again from the top either. Claude Code
+only appends to a session log, so the watch reads just the lines added since the
+last cycle and keeps the rest of the analysis. This is what keeps a cycle fast
+while a long session's log is being written: on a 359 MB log, reading one
+cycle's worth of new lines takes milliseconds instead of about two seconds. The
+log is read from the top instead whenever it cannot be shown to be the same
+file, grown: a different file under the same name, a shorter file, or changed
+bytes at either end of the part already read. Codex rollouts are always read
+from the top.
+
 - The output is unaffected: a cycle that reuses cached parses writes exactly the
   same bytes as a cold run over the same logs. Merging, de-duplication,
   `ccxlogid` numbering and the smart-write decision all stay identical.
@@ -185,7 +195,8 @@ are dropped from memory.
   to another project" verdict is re-checked against that resolution each cycle
   and thrown away as soon as it changes.
 - `--verbose` reports the split for every cycle, e.g.
-  `… , cache 2 reparsed / 238 reused`.
+  `… , cache 2 reparsed / 238 reused`, and how many of the reparsed files were
+  read only from where the last read stopped.
 
 **Reading the `--verbose` counters.** `files` is what discovery found;
 `fully read` is how many of those files were analysed for this cycle — *not* how
@@ -195,7 +206,10 @@ is still counted in `fully read`. The number actually read from disk this cycle 
 `fully read` next to `reparsed: 0`, and that is the mechanism working.
 
 Peak memory is set by the first (cold) cycle and does not grow with the number
-of cycles.
+of cycles. Reading only the appended lines costs a little more: for each Claude
+log written in the last 30 minutes, the watch keeps the unfinished end of the
+conversation (about 20 MB for the 359 MB log above), and lets it go once the
+log has been quiet for 30 minutes.
 
 #### Quiet cycles
 
@@ -221,6 +235,18 @@ rendering.` and reports its files as noop.
 - On a real project with 504 log files and 5,169 blocks (13 MB of Markdown), a
   quiet cycle went from 1.6 s to 0.1 s. A cycle in which a log did change still
   renders everything, as before.
+
+A cycle in which a log did change leaves the archive alone when it can. The
+archive holds everything older than `recentDays` and is usually by far the larger
+file, yet an ongoing conversation only ever changes the recent one. When the
+archive this cycle renders is exactly what the last cycle left on disk, and the
+file still has the size and modification time it was left with, the watch does
+not read, hash or compare it again; whether anything would be lost is then
+decided from the recent file, with the same answer as comparing both. Under
+`--verbose` such a cycle prints `Archive unchanged since the last cycle:
+<name> not re-read.` An edited, replaced or deleted archive, or blocks crossing
+into it, is compared in full as before. On a project with a 26 MB archive this
+took a changing cycle from about 1.7 s to 0.7 s.
 
 #### Stopping a watch
 
