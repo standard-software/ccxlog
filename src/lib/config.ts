@@ -22,6 +22,12 @@ export interface CcxlogConfig {
   // pulled in. Set false to restore exact-project-only matching (plus
   // extraCwds / extraLogDirs).
   includeSubdirectories: boolean;
+  // When true (default), logs are also looked for in every config dir directly
+  // in the home directory that matches <source>.configDirGlobs and holds logs
+  // (~/.claude-work beside ~/.claude, say), not only in the default one and in
+  // CLAUDE_CONFIG_DIR / CODEX_HOME (lib/logHomes.ts). Which project a log
+  // belongs to is decided exactly as for the default dir.
+  autoDiscover: boolean;
   // The watch wait time in seconds (watch-spec §4) — the wait in "process ->
   // wait this many seconds -> process". A run without watch reads it but never
   // uses it (which is neither a warning nor an error).
@@ -33,6 +39,7 @@ export interface CcxlogConfig {
   template: string;                  // resolved template CONTENT
   claude: {
     extraLogDirs: RootSpec[];
+    configDirGlobs: string[];
     // The RESOLVED display setting for subagent conversations (spec §5).
     // `claude.includeSubagents` is the official key; `claude.includeSidechain`
     // is kept as its supported former name and resolved into this one field, so
@@ -41,6 +48,7 @@ export interface CcxlogConfig {
   };
   codex: {
     extraLogDirs: RootSpec[];
+    configDirGlobs: string[];
     includeDeveloperMessages: boolean;
     // Codex has one spelling only: `codex.includeSubagents`. `includeSidechain`
     // is a Claude-log term and is deliberately NOT accepted here (spec §5.3), so
@@ -53,6 +61,7 @@ export function defaultConfig(): CcxlogConfig {
   return {
     extraCwds: [],
     includeSubdirectories: true,
+    autoDiscover: true,
     watchIntervalSeconds: DEFAULT_INTERVAL_SECONDS,
     recentDays: DEFAULT_RECENT_DAYS,
     autoBackupGraceMinutes: 10,
@@ -61,12 +70,14 @@ export function defaultConfig(): CcxlogConfig {
     template: DEFAULT_TEMPLATE,
     claude: {
       extraLogDirs: [],
+      configDirGlobs: ['.claude*'],
       // Both sources default to true (spec §5.1): a complete conversation record
       // is the standard behaviour, and it makes the migration purely additive.
       includeSubagents: true,
     },
     codex: {
       extraLogDirs: [],
+      configDirGlobs: ['.codex*'],
       includeDeveloperMessages: false,
       includeSubagents: true,
     },
@@ -94,6 +105,20 @@ function asStringArray(v: unknown, label: string, warnings: string[]): string[] 
   for (const x of v) {
     if (typeof x === 'string') out.push(x);
     else warnings.push(`Warning: ${label} contains a non-string element; ignoring it.`);
+  }
+  return out;
+}
+
+// configDirGlobs: names matched directly in the home directory, so a path
+// separator can never match and is reported instead of silently matching
+// nothing. An absent key keeps the default; an empty array turns the search off
+// for that source.
+function asGlobArray(v: unknown, fallback: string[], label: string, warnings: string[]): string[] {
+  if (v === undefined) return fallback;
+  const out: string[] = [];
+  for (const g of asStringArray(v, label, warnings)) {
+    if (g === '' || /[\\/]/.test(g)) warnings.push(`Warning: ${label} entry "${g}" must be a plain name pattern in the home directory; ignoring it.`);
+    else out.push(g);
   }
   return out;
 }
@@ -172,9 +197,9 @@ function asPositiveInteger(v: unknown, fallback: number, label: string, warnings
   return fallback;
 }
 
-const TOP_KEYS = new Set(['extraCwds', 'includeSubdirectories', 'watchIntervalSeconds', 'recentDays', 'autoBackupGraceMinutes', 'template', 'claude', 'codex']);
-const CLAUDE_KEYS = new Set(['extraLogDirs', 'includeSubagents', 'includeSidechain']);
-const CODEX_KEYS = new Set(['extraLogDirs', 'includeDeveloperMessages', 'includeSubagents']);
+const TOP_KEYS = new Set(['extraCwds', 'includeSubdirectories', 'autoDiscover', 'watchIntervalSeconds', 'recentDays', 'autoBackupGraceMinutes', 'template', 'claude', 'codex']);
+const CLAUDE_KEYS = new Set(['extraLogDirs', 'configDirGlobs', 'includeSubagents', 'includeSidechain']);
+const CODEX_KEYS = new Set(['extraLogDirs', 'configDirGlobs', 'includeDeveloperMessages', 'includeSubagents']);
 
 // Output file names are no longer configurable (v1.9.0). These keys are a
 // FATAL error rather than an ignored unknown key: ignoring them would quietly
@@ -311,6 +336,7 @@ export async function loadConfig(
 
   config.extraCwds = asStringArray(obj.extraCwds, 'extraCwds', warnings);
   config.includeSubdirectories = asBool(obj.includeSubdirectories, config.includeSubdirectories, 'includeSubdirectories', warnings);
+  config.autoDiscover = asBool(obj.autoDiscover, config.autoDiscover, 'autoDiscover', warnings);
   // watchIntervalSeconds follows the same "warn + default" shape as asBool /
   // asString (§4.2). A bad wait time cannot damage a file, so it is not fatal.
   const interval = validateIntervalSeconds(obj.watchIntervalSeconds);
@@ -340,6 +366,8 @@ export async function loadConfig(
   config.codex.includeDeveloperMessages = asBool(codex.includeDeveloperMessages, config.codex.includeDeveloperMessages, 'codex.includeDeveloperMessages', warnings);
   config.claude.extraLogDirs = asRootSpecArray(claude.extraLogDirs, 'claude.extraLogDirs', warnings);
   config.codex.extraLogDirs = asRootSpecArray(codex.extraLogDirs, 'codex.extraLogDirs', warnings);
+  config.claude.configDirGlobs = asGlobArray(claude.configDirGlobs, config.claude.configDirGlobs, 'claude.configDirGlobs', warnings);
+  config.codex.configDirGlobs = asGlobArray(codex.configDirGlobs, config.codex.configDirGlobs, 'codex.configDirGlobs', warnings);
 
   // Template (§4.5): the built-in default applies ONLY when the key is absent.
   // An explicit value is resolved; an explicit EMPTY value is a fatal error

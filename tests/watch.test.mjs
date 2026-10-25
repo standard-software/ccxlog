@@ -6,7 +6,7 @@ import os from 'node:os';
 import { spawn, spawnSync } from 'node:child_process';
 import {
   ROOT, CLI, mkTmp, rmrf, runCli, writeJsonl, writeClaudeSession, writeCodexSession,
-  writeCodexSessionIndex, claudeQA, codexQA, countPairs,
+  writeCodexSessionIndex, claudeQA, codexQA, countPairs, encodeCwd,
 } from './helpers.mjs';
 
 const {
@@ -53,7 +53,7 @@ function killLiveWatches() {
 }
 
 function childEnv(home) {
-  return { ...process.env, HOME: home, USERPROFILE: home, HOMEDRIVE: '', HOMEPATH: '' };
+  return { ...process.env, CLAUDE_CONFIG_DIR: '', CODEX_HOME: '', HOME: home, USERPROFILE: home, HOMEDRIVE: '', HOMEPATH: '' };
 }
 
 function startWatch(args, home, cwd = ROOT, extraEnv = {}) {
@@ -1156,6 +1156,22 @@ test('H-15: a growing Claude log is read only from where the last read stopped, 
   fs.appendFileSync(jsonl, q2.slice(half), 'utf-8');
   // The half may already have carried the whole question, so wait for the answer.
   assert.ok(await waitFor(() => fs.readFileSync(agg, 'utf-8').includes('Second answer'), 20000),
+    w.state.stdout + w.state.stderr);
+  await forceStop(w);
+  assertMatchesSingleRun(s, base);
+});
+
+test('H-16: a Claude config dir created after the watch started is picked up', async (t) => {
+  const s = scaffold(t, { interval: 1 });
+  const w = startWatch([s.project, '--watch'], s.home);
+  const agg = path.join(s.out, 'ccxlog.md');
+  assert.ok(await waitFor(() => fs.existsSync(agg) && countPairs(agg) === 1, 20000), w.state.stdout + w.state.stderr);
+  const base = snapshotMd(s.out);
+
+  // First use of another account: its config dir appears only now.
+  writeJsonl(path.join(s.home, '.claude-new', 'projects', encodeCwd(s.project), 'other.jsonl'),
+    claudeQA(s.project, { q: 'From the new account', a: 'New answer', uuid: 'n1', ts: '2026-05-27T11:06:49.000Z' }));
+  assert.ok(await waitFor(() => fs.readFileSync(agg, 'utf-8').includes('From the new account'), 20000),
     w.state.stdout + w.state.stderr);
   await forceStop(w);
   assertMatchesSingleRun(s, base);

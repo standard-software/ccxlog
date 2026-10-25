@@ -3,8 +3,9 @@
 // via ccxlog.config.json's "template" field (resolution order: §4.5).
 //
 // Placeholders (case-sensitive, surrounded by %): %DateTime% %Source%
-// %SourceShort% %CcxlogId% %SessionId% %SessionName% %Question% %Progress%
-// %ProgressFull% %Answer% %Model% %Version% %GitBranch% %Cwd% %Tokens%.
+// %SourceShort% %CcxlogId% %SessionId% %SessionName% %Account% %Question%
+// %Progress% %ProgressFull% %Answer% %Model% %Version% %GitBranch% %Cwd%
+// %Tokens%.
 
 export const DEFAULT_TEMPLATE = `<!-- %CcxlogId% -->
 # %DateTime%   [%Source%] Session:%SessionName%:%SessionId%
@@ -53,7 +54,7 @@ export function templateHasCcxlogIdMarker(tpl: string): boolean {
 // like %Name% is left verbatim in the output and reported once via --verbose.
 export const KNOWN_PLACEHOLDERS = new Set([
   'DateTime', 'Source', 'SourceShort', 'CcxlogId', 'SessionId', 'SessionName',
-  'Question', 'Progress', 'ProgressFull', 'Answer', 'Model', 'Version',
+  'Account', 'Question', 'Progress', 'ProgressFull', 'Answer', 'Model', 'Version',
   'GitBranch', 'Cwd', 'Tokens',
 ]);
 

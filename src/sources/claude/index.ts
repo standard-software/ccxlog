@@ -1,10 +1,11 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { CcxlogConfig } from '../../lib/config.js';
-import { encodeCwd, getClaudeProjectsDir, sha256HexBytes, canonicalPathString, canonicalPath, isPathWithin, buildRelativeId } from '../../lib/pathUtils.js';
+import { encodeCwd, sha256HexBytes, canonicalPathString, canonicalPath, isPathWithin, buildRelativeId } from '../../lib/pathUtils.js';
 import type { SourceAdapter, RootRef, DiscoveredFile, SessionData, FilterContext, ReadResume } from '../adapter.js';
 import { applyProgressRetention } from '../../lib/progressData.js';
 import type { Pair } from '../../lib/types.js';
+import type { LogHome } from '../../lib/logHomes.js';
 import { forEachLine } from '../../lib/lineStream.js';
 import { readClaudeSession, type ClaudeReadState } from './jsonlReader.js';
 
@@ -65,20 +66,26 @@ export const claudeAdapter: SourceAdapter = {
   label: 'ClaudeCode',
   shortLabel: 'cc',
 
-  candidateRoots(projectPath: string, realProjectPath: string, outDir: string, cfg: CcxlogConfig): RootRef[] {
-    const projectsDir = getClaudeProjectsDir();
-    const standardDirs = Array.from(new Set([
-      path.join(projectsDir, encodeCwd(projectPath)),
-      path.join(projectsDir, encodeCwd(realProjectPath)),
-      ...cfg.extraCwds.map(c => path.join(projectsDir, encodeCwd(path.resolve(projectPath, c)))),
-    ]));
-    const roots: RootRef[] = standardDirs.map(dir => ({
-      dir,
-      origin: 'standard' as const,
-      stableRootKey: 'std',
-      recursive: false,
-      scanSubagentDirs: true,
-    }));
+  candidateRoots(projectPath: string, realProjectPath: string, outDir: string, cfg: CcxlogConfig, homes: LogHome[]): RootRef[] {
+    // Every log home keeps the project under the same encoded name in its own
+    // projects/, whichever account wrote it.
+    const forHome = (home: LogHome): RootRef[] => {
+      const projectsDir = path.join(home.dir, 'projects');
+      const standardDirs = Array.from(new Set([
+        path.join(projectsDir, encodeCwd(projectPath)),
+        path.join(projectsDir, encodeCwd(realProjectPath)),
+        ...cfg.extraCwds.map(c => path.join(projectsDir, encodeCwd(path.resolve(projectPath, c)))),
+      ]));
+      return standardDirs.map(dir => ({
+        dir,
+        origin: 'standard' as const,
+        stableRootKey: home.key,
+        recursive: false,
+        scanSubagentDirs: true,
+        home: home.key,
+      }));
+    };
+    const roots: RootRef[] = homes.filter(h => h.found === 'default').flatMap(forHome);
     for (const spec of cfg.claude.extraLogDirs) {
       // Relative extraLogDirs resolve against <out>, not cwd (§4.2).
       const dir = path.resolve(outDir, spec.dir);
@@ -86,6 +93,7 @@ export const claudeAdapter: SourceAdapter = {
       roots.push({ dir, origin: 'extra', stableRootKey, recursive: false, scanSubagentDirs: true });
       // (scanSubagentDirs is unconditional: see RootRef.scanSubagentDirs.)
     }
+    roots.push(...homes.filter(h => h.found !== 'default').flatMap(forHome));
     return roots;
   },
 
@@ -99,33 +107,35 @@ export const claudeAdapter: SourceAdapter = {
   // become standard-origin RootRefs (stableRootKey 'std'), same as the exact
   // project roots — Claude's filterSession returns belongs:true, so their
   // sessions are kept verbatim.
-  async subdirRoots(projectPath: string, realProjectPath: string, _cfg: CcxlogConfig): Promise<RootRef[]> {
-    const projectsDir = getClaudeProjectsDir();
+  async subdirRoots(projectPath: string, realProjectPath: string, _cfg: CcxlogConfig, homes: LogHome[]): Promise<RootRef[]> {
     const bases = Array.from(new Set([projectPath, realProjectPath]));
     const exact = new Set(bases.map(b => encodeCwd(b)));
     const prefixes = bases.map(b => encodeCwd(b) + '-');
-    let names: string[];
-    try {
-      names = await fs.readdir(projectsDir);
-    } catch {
-      return [];
-    }
     const canonBases = await Promise.all(bases.map(canonicalPath));
     const roots: RootRef[] = [];
-    for (const name of names.sort()) {
-      if (exact.has(name)) continue;
-      if (!prefixes.some(pre => name.startsWith(pre))) continue;
-      const dir = path.join(projectsDir, name);
+    for (const home of homes) {
+      const projectsDir = path.join(home.dir, 'projects');
+      let names: string[];
       try {
-        if (!(await fs.stat(dir)).isDirectory()) continue;
+        names = await fs.readdir(projectsDir);
       } catch {
-        continue;   // vanished between readdir and stat
+        continue;
       }
-      const cwd = await firstLoggedCwd(dir);
-      if (!cwd) continue;
-      const canonCwd = await canonicalPath(cwd);
-      if (!canonBases.some(b => isPathWithin(canonCwd, b))) continue;   // sibling — reject
-      roots.push({ dir, origin: 'standard', stableRootKey: 'std', recursive: false, scanSubagentDirs: true });
+      for (const name of names.sort()) {
+        if (exact.has(name)) continue;
+        if (!prefixes.some(pre => name.startsWith(pre))) continue;
+        const dir = path.join(projectsDir, name);
+        try {
+          if (!(await fs.stat(dir)).isDirectory()) continue;
+        } catch {
+          continue;   // vanished between readdir and stat
+        }
+        const cwd = await firstLoggedCwd(dir);
+        if (!cwd) continue;
+        const canonCwd = await canonicalPath(cwd);
+        if (!canonBases.some(b => isPathWithin(canonCwd, b))) continue;   // sibling — reject
+        roots.push({ dir, origin: 'standard', stableRootKey: home.key, recursive: false, scanSubagentDirs: true, home: home.key });
+      }
     }
     return roots;
   },
@@ -172,6 +182,7 @@ export const claudeAdapter: SourceAdapter = {
       allPairs: pairs,
       skippedLines: r.skippedLines,
       formatRecognized: r.formatRecognized,
+      logHome: file.root.home,
     };
   },
 

@@ -159,6 +159,8 @@ export interface UnifyParams {
   fileContentHash: () => Promise<string>;
   eventIdStream: string[];
   questionOrdinal: number;
+  // The account logged in to the log home the session came from (%Account%).
+  account?: string;
 }
 
 export function toUnifiedPair(p: UnifyParams): UnifiedPair {
@@ -198,6 +200,7 @@ export function toUnifiedPair(p: UnifyParams): UnifiedPair {
     sourceLabel: p.sourceLabel,
     sessionId: p.sessionId,
     sessionName: p.sessionName,
+    account: p.account ?? '',
     sourceFile: p.sourceFile,
     sourceFileRelativeId: p.sourceFileRelativeId,
     questionEventUuid: pair.questionEntry.uuid || undefined,
@@ -241,6 +244,7 @@ export function formatPair(u: UnifiedPair, template: string): string {
     CcxlogId: u.ccxid,
     SessionId: u.sessionId,
     SessionName: u.sessionName,
+    Account: u.account,
     Question: u.question,
     // Progress is built only when the template really references it. ('%Progress%'
     // is not a substring of '%ProgressFull%' — the closing '%' differs — so these

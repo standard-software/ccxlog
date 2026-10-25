@@ -156,11 +156,25 @@ export interface DedupeResult {
   possibleDuplicates: number;
 }
 
+// Should the confirmed duplicate `p` replace the kept copy `old`?
+//  - An answered copy replaces an empty one (the original rule).
+//  - A copy from a log that is the other's log continued — the same session
+//    kept under two log homes, one of which went on (v1.14.0) — replaces it
+//    when the two differ: the earlier copy is an old snapshot of the same turn,
+//    and its answer may stop short. That copy also hands over its ccxlogid,
+//    which it was given for sorting first: the block keeps the id it had while
+//    only the older copy was seen, and keeps it when that copy goes away.
+function supersedes(p: UnifiedPair, old: UnifiedPair): 'answered' | 'continued' | null {
+  if (!old.answer && p.answer) return 'answered';
+  if (old.answer !== p.answer && strictPrefix(old.eventIdStream, p.eventIdStream)) return 'continued';
+  return null;
+}
+
 // Conservative logical de-duplication (§6.3), applied AFTER the sort so
 // "keep the first occurrence" is deterministic. When a confirmed duplicate is
-// answered but the earlier kept copy is empty, the answered copy takes over the
-// earlier copy's OUTPUT POSITION (so the reader gets the complete block without
-// disturbing the deterministic order).
+// answered but the earlier kept copy is empty, or comes from the continued log
+// (supersedes()), it takes over the earlier copy's OUTPUT POSITION (so the
+// reader gets the complete block without disturbing the deterministic order).
 // It is async because confirmDuplicate involves the lazy hash (an async disk read).
 export async function dedupePairs(sorted: UnifiedPair[]): Promise<DedupeResult> {
   const groups = new Map<string, { members: UnifiedPair[]; budget: { n: number } }>();
@@ -184,7 +198,9 @@ export async function dedupePairs(sorted: UnifiedPair[]): Promise<DedupeResult> 
       // Answered-copy-wins: if the earlier kept member has no answer but p does,
       // swap p into its position (same order, richer content).
       const old = group.members[dupOf];
-      if (!old.answer && p.answer) {
+      const why = supersedes(p, old);
+      if (why) {
+        if (why === 'continued') p.ccxid = old.ccxid;
         group.members[dupOf] = p;
         const keptIndex = kept.indexOf(old);
         if (keptIndex >= 0) kept[keptIndex] = p;

@@ -15,6 +15,7 @@ import {
   isDestructiveWithSharedTail, sharedTail, type SharedTail,
 } from './lib/identity.js';
 import { compareUnifiedPairs, dedupePairs, dedupeForkedSessions } from './lib/merge.js';
+import { findLogHomes, type LogHome } from './lib/logHomes.js';
 import { hasBothProgress, templateHasSource, unknownPlaceholders } from './lib/templates.js';
 import { progressDataNeeded } from './lib/progressData.js';
 import {
@@ -299,6 +300,7 @@ function checkRootNamespaces(roots: RootRef[], sourceId: string, errors: string[
 
 interface AdapterRun {
   adapter: SourceAdapter;
+  homes: LogHome[];          // this cycle's log homes (lib/logHomes.ts), the default first
   roots: RootRef[];
   files: DiscoveredFile[];
   filesRead: number;         // files that reached analysis after the prefilter (--verbose)
@@ -409,6 +411,8 @@ function cycleInputsKey(fingerprint: string, opts: CliOptions, adapterRuns: Adap
     day: localDateKey(archiveNow()),
     sources: adapterRuns.map(ar => ({
       id: ar.adapter.id,
+      // The accounts feed %Account%, so a login change re-renders.
+      homes: ar.homes.map(h => [h.key, h.account]),
       roots: ar.roots.map(r => [r.origin, r.stableRootKey, r.dir]),
       files: ar.files.map(f => [f.filePath, f.snapshot ?? null]),
       sessions: ar.sessions.map(s => [s.sessionId, s.sessionName, s.allPairs.length]),
@@ -613,13 +617,16 @@ async function run(
   const runErrors: string[] = [];
   const adapterRuns: AdapterRun[] = [];
   for (const adapter of adapters) {
-    const roots = adapter.candidateRoots(opts.projectPath, realProjectPath, opts.outDir, config);
+    // Looked for again every cycle, so a config dir created after a watch
+    // started (a first login with another account) is picked up.
+    const homes = await findLogHomes(adapter.id, config);
+    const roots = adapter.candidateRoots(opts.projectPath, realProjectPath, opts.outDir, config, homes);
     // Nested-project roots (§ includeSubdirectories). Merge in the adapter's
     // subdir roots, dropping any whose dir already appears as a candidate root
     // (so a subdirectory that is ALSO an extraCwd is not discovered twice).
     if (config.includeSubdirectories && adapter.subdirRoots) {
       const seenDirs = new Set(roots.map(r => canonicalPathString(r.dir)));
-      const extra = await adapter.subdirRoots(opts.projectPath, realProjectPath, config);
+      const extra = await adapter.subdirRoots(opts.projectPath, realProjectPath, config, homes);
       for (const r of extra) {
         const key = canonicalPathString(r.dir);
         if (seenDirs.has(key)) continue;
@@ -629,7 +636,7 @@ async function run(
     }
     checkRootNamespaces(roots, adapter.id, runErrors);
     adapterRuns.push({
-      adapter, roots, files: [], filesRead: 0, reparsed: 0, reused: 0, resumed: 0,
+      adapter, homes, roots, files: [], filesRead: 0, reparsed: 0, reused: 0, resumed: 0,
       formatSkipped: [], sessions: [],
     });
   }
@@ -697,7 +704,9 @@ async function run(
   // Build UnifiedPairs for each session (questionOrdinal = index in filtered pairs).
   const sessionUnified: SessionUnified[] = [];
   for (const ar of adapterRuns) {
+    const accounts = new Map(ar.homes.map(h => [h.key, h.account]));
     for (const s of ar.sessions) {
+      const account = s.logHome !== undefined ? accounts.get(s.logHome) ?? '' : '';
       const ups: UnifiedPair[] = s.allPairs.map((pair, i) => toUnifiedPair({
         pair,
         source: ar.adapter.id,
@@ -709,6 +718,7 @@ async function run(
         fileContentHash: s.fileContentHash,
         eventIdStream: s.eventIdStream,
         questionOrdinal: i,
+        account,
       }));
       sessionUnified.push({ session: s, adapter: ar.adapter, pairs: ups });
     }
@@ -1034,13 +1044,40 @@ interface DeleteTask {
   expectSourcePath?: string;
 }
 
+// One session found under two log homes (a history copied from one config dir
+// to another, say) is one session, and per-session output names its file after
+// the session id, so the copies would collide on one name. They are written as
+// one file instead: the pairs of all copies, with duplicates removed as the
+// aggregate output removes them (dedupePairs), under the copy whose log goes
+// furthest. Sessions with distinct ids are untouched.
+async function mergeSessionCopies(sessionUnified: SessionUnified[]): Promise<SessionUnified[]> {
+  const groups = new Map<string, SessionUnified[]>();
+  for (const su of sessionUnified) {
+    const key = `${su.adapter.id}\0${su.session.sessionId}`;
+    const arr = groups.get(key);
+    if (arr) arr.push(su); else groups.set(key, [su]);
+  }
+  const merged: SessionUnified[] = [];
+  for (const su of sessionUnified) {
+    const group = groups.get(`${su.adapter.id}\0${su.session.sessionId}`)!;
+    if (group.length === 1) { merged.push(su); continue; }
+    if (group[0] !== su) continue;     // the whole group is emitted at its first member
+    const lead = group.reduce((a, b) => (b.session.eventIdStream.length > a.session.eventIdStream.length ? b : a));
+    const sorted = group.flatMap(g => g.pairs).sort(compareUnifiedPairs);
+    const { kept } = await dedupePairs(sorted);
+    merged.push({ ...lead, pairs: kept });
+  }
+  return merged;
+}
+
 async function writePerSession(
   opts: CliOptions,
   config: CcxlogConfig,
-  sessionUnified: SessionUnified[],
+  sessionsAsFound: SessionUnified[],
   mdBackupDir: string,
   out: OutputSink,
 ): Promise<RunOutcome> {
+  const sessionUnified = await mergeSessionCopies(sessionsAsFound);
   const backupNowMs = archiveNow().getTime();
   const backupIgnoreSinceMs = backupNowMs - config.autoBackupGraceMinutes * 60_000;
   const writeTasks: WriteTask[] = [];
@@ -1395,6 +1432,11 @@ function printVerbose(
     out.log('  (fully read = files analysed this cycle; reparsed = files actually re-read from disk)');
   }
   for (const ar of adapterRuns) {
+    out.log(`[${ar.adapter.id}] log homes:`);
+    for (const h of ar.homes) {
+      out.log(`  ${h.dir} (${h.found === 'default' ? 'default' : h.found === 'env' ? 'from the environment' : 'found in the home directory'}`
+        + `${h.account ? `, ${h.account}` : ''})`);
+    }
     out.log(`[${ar.adapter.id}] roots:`);
     for (const r of ar.roots) out.log(`  ${r.origin === 'extra' ? '*' : '+'} ${r.dir}`);
     out.log(`[${ar.adapter.id}] files: ${ar.files.length}, fully read: ${ar.filesRead}, sessions kept: ${ar.sessions.length}`

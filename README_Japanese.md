@@ -73,6 +73,19 @@ ccxlog はこれらの JSONL ファイルを検出し、実行対象のプロジ
 読み取ります。別の場所にあるログを追加で読み取る場合は、設定ファイルの
 `claude.extraLogDirs` または `codex.extraLogDirs` を使用できます。
 
+別の設定ディレクトリに書かれたログも見つけます。Claude Code を
+`CLAUDE_CONFIG_DIR` 付きで動かすと（アカウントごとに `~/.claude-work` を使う、
+など）、ログは `~/.claude-work/projects/` に書かれます。Codex も `CODEX_HOME` で
+同じです。この変数はたいていツールを動かしている間しか設定されないので、ccxlog は
+変数だけに頼りません。既定のディレクトリと変数（設定されていれば）に加えて、
+ホームディレクトリ直下の `.claude*` / `.codex*` のうち `projects/` / `sessions/` を
+持つものも探します。`--watch` では周期ごとに探し直します。どのプロジェクトのログかは
+既定のディレクトリと同じ方法で判定するので、ほかのプロジェクトのログは混ざりません。
+同じセッションが2か所にある場合（履歴をコピーした場合など）は1回だけ書き、新しい
+ほうのコピーにしかない内容も残します。`--verbose` では、見つけたディレクトリを、
+それぞれにログインしているアカウントとともに表示します。下の `autoDiscover` と
+`configDirGlobs` も参照してください。
+
 ### オプション
 
 ```
@@ -384,6 +397,7 @@ Markdown の（再）生成は**行いません**。
     "/home/you/projects/another-project"
   ],
   "includeSubdirectories": true,
+  "autoDiscover": true,
   "watchIntervalSeconds": 5,
   "recentDays": 8,
   "autoBackupGraceMinutes": 10,
@@ -391,10 +405,12 @@ Markdown の（再）生成は**行いません**。
 
   "claude": {
     "extraLogDirs": [],
+    "configDirGlobs": [".claude*"],
     "includeSubagents": true
   },
   "codex": {
     "extraLogDirs": [],
+    "configDirGlobs": [".codex*"],
     "includeDeveloperMessages": false,
     "includeSubagents": true
   }
@@ -410,6 +426,7 @@ Ubuntu/macOS ではスラッシュ区切りのパス（`/home/you/...`）を使�
 | フィールド                | 説明                                                                        |
 |---------------------------|-----------------------------------------------------------------------------|
 | `extraCwds`               | 出力に統合したい追加のプロジェクトディレクトリ（どちらのツールのログも対象）。 |
+| `autoDiscover`            | `true`（既定）なら、ホームディレクトリ直下で `configDirGlobs` に当てはまり、ログを持つディレクトリのログも読む（[ログの保存場所と検出](#ログの保存場所と検出) を参照）。`false` にすると、既定のディレクトリと、設定されていれば `CLAUDE_CONFIG_DIR` / `CODEX_HOME` だけを読む。 |
 | `includeSubdirectories`   | `true`（既定）なら、ccxlog を実行したプロジェクトの *サブディレクトリ* を cwd とするプロジェクトのログも収集する（例: `~/work/app` で実行すると `~/work/app/frontend` も収集）。候補は各セッションの実 cwd と照合されるので、同接頭辞の兄弟（`~/work/app-backup`）は決して混入しない。`false` にすると、正確なプロジェクトパス（＋ `extraCwds` / `extraLogDirs`）だけに一致。 |
 | `watchIntervalSeconds`    | `--watch` の待機秒数。1〜86400 の整数、既定 `5`。範囲外・非整数は警告1行を出して 5 にフォールバックする。`--watch` を使わない実行では使われない。 |
 | `recentDays`              | 日常用集約ファイルに残すローカル暦日数。1以上の整数、既定 `8`（今日から前週の同じ曜日まで）。それ以前は対応する `_archive.md` へ移し、空になる場合はアーカイブを残さない。 |
@@ -424,6 +441,7 @@ Ubuntu/macOS ではスラッシュ区切りのパス（`/home/you/...`）を使�
 
 | フィールド                | 説明                                                                        |
 |---------------------------|-----------------------------------------------------------------------------|
+| `configDirGlobs`          | ホームディレクトリ直下で探す設定ディレクトリの名前。`*` と `?` が使える。既定は claude が `[".claude*"]`、codex が `[".codex*"]`。当てはまっても、`projects/`（claude）または `sessions/`（codex）を持たないものは使わない。空の配列にすると、そのソースでは探さない。 |
 | `extraLogDirs`            | そのまま読み取る追加の生ログディレクトリ（バックアップのスナップショット、別マシンから持ってきたログツリーなど）。cwd フィルタなしで読み、`<out>` 配下（例: `backup_jsonl/<日時>/cc`）を含めどこでも指定できる。各ソースは自分の形式のファイルだけを取り込む（claude は Codex rollout を、codex は Claude セッションログを読み飛ばし、無関係な `.jsonl` は両方が読み飛ばす。`--verbose` で表示）。 |
 | `includeSubagents`        | `true`（**既定**）なら、サブエージェント（セッションが作業を委任した子 AI・子スレッド）の会話も描画する。`false` にすると本体の会話だけを残す。キーはそれぞれ自分のソースだけを制御する。下の [サブエージェント](#サブエージェント) を参照。 |
 | `includeSidechain`        | *(claude のみ)* `claude.includeSubagents` のサポート対象の旧名。`sidechain` は同じ記録に対する Claude Code の歴史的な用語で、この設定だけを書いていた場合は今までどおり動作する。**両方**に**異なる**値を書いた場合は致命的な設定エラーになる（どちらかを黙って優先することはしない）。 |
@@ -496,6 +514,7 @@ per-session ファイルもバックアップしたうえで削除します（�
 | `%CcxlogId%`      | `ccxlogid` — 回答非依存でツール横断的に安定な ID。ブロックの識別マーカーとして使われる |
 | `%SessionId%`     | セッション ID                                            |
 | `%SessionName%`   | 人間可読なセッション名 — Codex は `~/.codex/session_index.jsonl` の `thread_name`、Claude Code はカスタム名または自動生成名。取得できなければ空 |
+| `%Account%`       | ログが見つかった設定ディレクトリにログインしているアカウント（Claude Code は `.claude.json` の `oauthAccount.emailAddress`、Codex は `auth.json` のメールアドレス）。どちらのツールもログにアカウントを記録しないので、いまのログイン状態を表す。わからない場合と `extraLogDirs` のログでは空。標準テンプレートには入っていない。例: `[%Source%@%Account%]` |
 | `%Question%`      | ユーザーのメッセージ                                     |
 | `%Answer%`        | アシスタントの返答                                       |
 | `%Progress%`      | （任意）Q と A の間のツール呼び出しを**要約**したもの      |

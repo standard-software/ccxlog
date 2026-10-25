@@ -4,6 +4,23 @@
 
 ## Version
 
+### 1.14.0
+#### 2026/10/26(Mon)
+- logs written under another Claude Code or Codex config directory are read
+  without `extraLogDirs`. Running Claude Code with `CLAUDE_CONFIG_DIR` (one
+  directory per account, such as `~/.claude-work`) stored that folder's
+  conversations where ccxlog never looked, so they were missing from
+  `ccxlog.md`. ccxlog now also reads `CLAUDE_CONFIG_DIR` / `CODEX_HOME`, and
+  every `.claude*` / `.codex*` directory in the home directory that holds logs,
+  searching again on every `--watch` cycle. Logs are attributed to the project
+  as before. New settings `autoDiscover`, `claude.configDirGlobs` and
+  `codex.configDirGlobs`; `--verbose` lists the directories found
+- a session found under two config directories is written once, and the block
+  shared by both copies takes what only the later copy has. `--per-session` no
+  longer stops with a name collision for such a session
+- new template placeholder `%Account%`: the account logged in to the config
+  directory a log came from
+
 ### 1.13.0
 #### 2026/10/23(Fri)
 - `--watch` reads only the lines added to a Claude Code log since the last

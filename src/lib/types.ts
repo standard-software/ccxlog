@@ -127,6 +127,10 @@ export interface UnifiedPair {
   sourceLabel: SourceLabel;
   sessionId: string;
   sessionName: string;
+  // The account logged in NOW to the log home the session was found under
+  // (lib/logHomes.ts); '' when it cannot be told or for an extraLogDirs file.
+  // Neither source records the account in the log itself.
+  account: string;
   sourceFile: string;                 // display (absolute path)
   sourceFileRelativeId: string;       // namespaced stable id (§5.5)
   questionEventUuid?: string;

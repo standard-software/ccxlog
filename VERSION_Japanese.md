@@ -4,6 +4,22 @@
 
 ## Version
 
+### 1.14.0
+#### 2026/10/26(月)
+- 別の Claude Code / Codex の設定ディレクトリに書かれたログを、`extraLogDirs` なしで
+  読むようにした。Claude Code を `CLAUDE_CONFIG_DIR` 付きで動かすと（アカウントごとに
+  `~/.claude-work` を使う、など）、そのフォルダでの会話は ccxlog が見ない場所に
+  保存され、`ccxlog.md` に出なかった。`CLAUDE_CONFIG_DIR` / `CODEX_HOME` と、
+  ホームディレクトリ直下でログを持つ `.claude*` / `.codex*` も読む。`--watch` では
+  周期ごとに探し直す。どのプロジェクトのログかの判定はこれまでどおり。設定
+  `autoDiscover`、`claude.configDirGlobs`、`codex.configDirGlobs` を追加。
+  `--verbose` で見つけたディレクトリを表示する
+- 2つの設定ディレクトリにある同じセッションは1回だけ書き、両方にあるブロックは
+  新しいほうのコピーの内容を使う。このようなセッションで `--per-session` が
+  ファイル名の衝突で止まらなくなった
+- テンプレートのプレースホルダ `%Account%` を追加。ログが見つかった設定
+  ディレクトリにログインしているアカウントを表す
+
 ### 1.13.0
 #### 2026/10/23(金)
 - `--watch` で、Claude Code のログは前の周期から増えた行だけを読むようにした。

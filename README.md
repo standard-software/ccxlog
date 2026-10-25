@@ -73,6 +73,19 @@ ccxlog discovers these JSONL files and reads the sessions that belong to the
 target project. To read logs from another location, use `claude.extraLogDirs` or
 `codex.extraLogDirs` in the configuration file.
 
+Logs written under another config directory are found as well. When Claude
+Code runs with `CLAUDE_CONFIG_DIR` (one directory per account, say
+`~/.claude-work`), its logs go to `~/.claude-work/projects/` instead; Codex does
+the same with `CODEX_HOME`. Such a variable is usually set only while the tool
+runs, so ccxlog does not rely on it alone: besides the default directory and
+the variable (when set), it searches the home directory for entries matching
+`.claude*` / `.codex*` that hold `projects/` / `sessions/`, again on every
+`--watch` cycle. Whose project a log belongs to is decided exactly as for the
+default directory, so logs of other projects are never mixed in. A session
+that sits under two of them (a copied history) is written once, keeping what
+only the later copy has. `--verbose` lists the directories found, with the
+account logged in to each. See `autoDiscover` and `configDirGlobs` below.
+
 ### Options
 
 ```
@@ -402,6 +415,7 @@ or `codex` namespace:
     "/home/you/projects/another-project"
   ],
   "includeSubdirectories": true,
+  "autoDiscover": true,
   "watchIntervalSeconds": 5,
   "recentDays": 8,
   "autoBackupGraceMinutes": 10,
@@ -409,10 +423,12 @@ or `codex` namespace:
 
   "claude": {
     "extraLogDirs": [],
+    "configDirGlobs": [".claude*"],
     "includeSubagents": true
   },
   "codex": {
     "extraLogDirs": [],
+    "configDirGlobs": [".codex*"],
     "includeDeveloperMessages": false,
     "includeSubagents": true
   }
@@ -428,6 +444,7 @@ on Ubuntu/macOS (`/home/you/...`).
 |---------------------------|-----------------------------------------------------------------------------|
 | `extraCwds`               | Additional project directories whose logs (from either tool) should be merged into the output. |
 | `includeSubdirectories`   | If `true` (default), also collect logs from projects whose cwd is a *subdirectory* of the project ccxlog runs in (e.g. running in `~/work/app` also gathers `~/work/app/frontend`). Nested candidates are verified against each session's real cwd, so same-prefix siblings like `~/work/app-backup` are never included. Set `false` to match only the exact project path (plus `extraCwds` / `extraLogDirs`). |
+| `autoDiscover`            | If `true` (default), also read logs under every directory in your home directory that matches `configDirGlobs` and holds logs (see [Log locations and discovery](#log-locations-and-discovery)). Set `false` to read only the default directory and `CLAUDE_CONFIG_DIR` / `CODEX_HOME` when set. |
 | `watchIntervalSeconds`    | How long `--watch` waits between cycles, in seconds. Integer, 1-86400, default `5`. An out-of-range or non-integer value warns once and falls back to 5. Ignored when `--watch` is not used. |
 | `recentDays`              | Number of local calendar days kept in the everyday aggregate. Integer of 1 or greater, default `8` (today plus the same weekday from the previous week). Older blocks go to the matching `_archive.md`; no archive is kept when it would be empty. |
 | `autoBackupGraceMinutes`  | Recent-ID grace period for automatic Markdown backups, in minutes. Integer from `1` through `60`, default `10`. A disappearing block whose timestamp is inside this window does not trigger an automatic backup; this absorbs ID changes while a live response is still growing. Manual backups are unchanged. |
@@ -442,6 +459,7 @@ template or timezone. Older markers without `time` remain readable.
 | Field                     | Description                                                                 |
 |---------------------------|-----------------------------------------------------------------------------|
 | `extraLogDirs`            | Additional raw log directories to read verbatim (backup snapshots, log trees copied from another machine, ...). Entries are read without the cwd filter, and may point anywhere — including under `<out>` (e.g. `backup_jsonl/<stamp>/cc`). Each source ingests only files in its own format (claude skips Codex rollouts and vice versa; unrelated `.jsonl` is skipped by both, reported under `--verbose`). |
+| `configDirGlobs`          | Names of config directories to look for directly in your home directory, with `*` and `?` as wildcards. Default `[".claude*"]` for claude and `[".codex*"]` for codex. A match is used only when it holds `projects/` (claude) or `sessions/` (codex). An empty array turns the search off for that source. |
 | `includeSubagents`        | If `true` (**default**), render the conversations of subagents — the child AIs or threads a session delegates work to. Set `false` to keep only the main conversation. Each key controls its own source. See [Subagents](#subagents) below. |
 | `includeSidechain`        | *(claude only)* The supported former name of `claude.includeSubagents`; `sidechain` is Claude Code's historical term for the same records. It still works on its own. Setting **both** to *different* values is a fatal config error — ccxlog will not silently pick one. |
 | `includeDeveloperMessages`| *(codex only)* If `true`, include Codex developer/system messages in the output. |
@@ -517,6 +535,7 @@ A template can use the following placeholders:
 | `%CcxlogId%`      | `ccxlogid` — an answer-independent, cross-tool-stable id used as the block's identity marker |
 | `%SessionId%`     | The session id                                           |
 | `%SessionName%`   | Human-readable session name — for Codex, `thread_name` from `~/.codex/session_index.jsonl`; for Claude Code, the custom or generated title; empty when unavailable |
+| `%Account%`       | The account logged in to the config directory the log was found under (`oauthAccount.emailAddress` in Claude Code's `.claude.json`, the email in Codex's `auth.json`). Neither tool records the account in the log, so this is the login there now; empty when unknown or for `extraLogDirs` logs. Not in the built-in templates; e.g. `[%Source%@%Account%]` |
 | `%Question%`      | The user's message                                       |
 | `%Answer%`        | The assistant's reply                                    |
 | `%Progress%`      | (optional) Tool calls between Q and A, **summarized**     |

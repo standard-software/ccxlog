@@ -1,6 +1,6 @@
 import path from 'node:path';
 import type { CcxlogConfig } from '../../lib/config.js';
-import { getCodexSessionsDir, sha256HexBytes, canonicalPathString, canonicalPath, isPathWithin, buildRelativeId } from '../../lib/pathUtils.js';
+import { sha256HexBytes, canonicalPathString, canonicalPath, isPathWithin, buildRelativeId } from '../../lib/pathUtils.js';
 import { extractCwd } from '../../lib/metaExtractor.js';
 import type { SourceAdapter, RootRef, DiscoveredFile, SessionData, FilterContext, FilterResult } from '../adapter.js';
 import { applyProgressRetention } from '../../lib/progressData.js';
@@ -8,25 +8,31 @@ import { prefilterCodexFiles } from './cwdScanner.js';
 import { readJsonl } from './jsonlReader.js';
 import { buildPairs } from './pairBuilder.js';
 import { applyCodexSessionNames } from './sessionIndex.js';
+import type { LogHome } from '../../lib/logHomes.js';
 
 export const codexAdapter: SourceAdapter = {
   id: 'codex',
   label: 'Codex',
   shortLabel: 'cx',
 
-  candidateRoots(_projectPath: string, _realProjectPath: string, outDir: string, cfg: CcxlogConfig): RootRef[] {
-    const roots: RootRef[] = [{
-      dir: getCodexSessionsDir(),
+  candidateRoots(_projectPath: string, _realProjectPath: string, outDir: string, cfg: CcxlogConfig, homes: LogHome[]): RootRef[] {
+    // Every log home's sessions/ tree mixes all projects, so each is walked
+    // whole and filtered by cwd, exactly like the default one.
+    const forHome = (home: LogHome): RootRef => ({
+      dir: path.join(home.dir, 'sessions'),
       origin: 'standard',
-      stableRootKey: 'std',
+      stableRootKey: home.key,
       recursive: true,
-    }];
+      home: home.key,
+    });
+    const roots: RootRef[] = homes.filter(h => h.found === 'default').map(forHome);
     for (const spec of cfg.codex.extraLogDirs) {
       // Relative extraLogDirs resolve against <out>, not cwd (§4.2).
       const dir = path.resolve(outDir, spec.dir);
       const stableRootKey = spec.key ?? sha256HexBytes(canonicalPathString(dir), 12);
       roots.push({ dir, origin: 'extra', stableRootKey, recursive: true });
     }
+    roots.push(...homes.filter(h => h.found !== 'default').map(forHome));
     return roots;
   },
 
@@ -66,6 +72,7 @@ export const codexAdapter: SourceAdapter = {
       skippedLines: r.skippedLines,
       formatRecognized: r.formatRecognized,
       thread: r.thread,
+      logHome: file.root.home,
     };
   },
 

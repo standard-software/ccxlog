@@ -1,7 +1,6 @@
 import fs from 'node:fs/promises';
 import { createReadStream } from 'node:fs';
 import path from 'node:path';
-import os from 'node:os';
 import crypto from 'node:crypto';
 
 export function sha256Hex(input: string | Buffer): string {
@@ -103,18 +102,6 @@ async function hashFileGuarded(filePath: string, expected: FileSnapshot): Promis
 // non-ASCII all collapse to '-'.
 export function encodeCwd(cwd: string): string {
   return cwd.replace(/[^a-zA-Z0-9]/g, '-');
-}
-
-export function getClaudeProjectsDir(): string {
-  return path.join(os.homedir(), '.claude', 'projects');
-}
-
-export function getClaudeLogDirForProject(cwd: string): string {
-  return path.join(getClaudeProjectsDir(), encodeCwd(cwd));
-}
-
-export function getCodexSessionsDir(): string {
-  return path.join(os.homedir(), '.codex', 'sessions');
 }
 
 // canonicalPath (§5.4): resolve -> realpath (best effort) -> normalize ->

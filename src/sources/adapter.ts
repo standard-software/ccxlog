@@ -1,16 +1,21 @@
 import type { CcxlogConfig } from '../lib/config.js';
+import type { LogHome } from '../lib/logHomes.js';
 import type { FileSnapshot, PathDep } from '../lib/pathUtils.js';
 import type { Pair, Source, SourceLabel, ThreadIdentity } from '../lib/types.js';
 
 // A discovery root and its stable namespace key (§5.5). `origin` is
-// 'standard' (the source's default log tree) or 'extra' (an extraLogDirs
-// entry). `stableRootKey` is 'std' for standard roots, and either the user
-// alias or a hash of the canonical dir for extra roots.
+// 'standard' (a log tree under one of the source's log homes, lib/logHomes.ts)
+// or 'extra' (an extraLogDirs entry). `stableRootKey` is the log home's key for
+// standard roots ('std' for the default home), and either the user alias or a
+// hash of the canonical dir for extra roots.
 export interface RootRef {
   dir: string;
   origin: 'standard' | 'extra';
   stableRootKey: string;
   recursive: boolean;
+  // Standard roots only: the key of the log home the root lies in, which is
+  // how a session is told which account it was written under (%Account%).
+  home?: string;
   // Claude only: also scan subagents/*.jsonl under each session directory
   // immediately below the root — the separate-file layout Claude Code uses for
   // subagent transcripts. It does NOT depend on `includeSubagents`: discovery
@@ -53,6 +58,9 @@ export interface SessionData {
   // `sessionId` above stays the id used for display and file names; this is the
   // extra material the parent/child matching needs.
   thread?: ThreadIdentity;
+  // The key of the log home the file was found under (RootRef.home); undefined
+  // for a file found through extraLogDirs.
+  logHome?: string;
 }
 
 // Carried across --watch cycles for one file so a reader can pick up where it
@@ -99,14 +107,19 @@ export interface SourceAdapter {
   readonly shortLabel: 'cc' | 'cx';
   // `outDir` is the config-file location; relative extraLogDirs resolve
   // against it (§4.2), so the same config finds the same logs from any cwd.
-  candidateRoots(projectPath: string, realProjectPath: string, outDir: string, cfg: CcxlogConfig): RootRef[];
+  // `homes` are this cycle's log homes, the default first. The roots of the
+  // default home come first, then the extraLogDirs, then the other homes: a
+  // file reachable both ways is taken through the earlier root, so an
+  // extraLogDirs entry keeps the meaning it had before other homes were
+  // searched (a Codex extra root is not filtered by cwd, for one).
+  candidateRoots(projectPath: string, realProjectPath: string, outDir: string, cfg: CcxlogConfig, homes: LogHome[]): RootRef[];
   // Optional (§ includeSubdirectories): extra standard roots for projects
   // whose cwd is nested UNDER the target project. Claude implements this by
   // scanning ~/.claude/projects for prefix-matched folders and confirming each
   // one's real cwd; Codex has no per-project tree so leaves it unimplemented
   // (it widens its own cwd filter instead). Only called when
   // cfg.includeSubdirectories is true.
-  subdirRoots?(projectPath: string, realProjectPath: string, cfg: CcxlogConfig): Promise<RootRef[]>;
+  subdirRoots?(projectPath: string, realProjectPath: string, cfg: CcxlogConfig, homes: LogHome[]): Promise<RootRef[]>;
   // Optional: a lightweight prefilter run before any session is fully parsed.
   // The only files it may exclude are those that CANNOT belong to the target
   // project; a file whose belonging is unknown must be kept and passed on to

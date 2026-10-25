@@ -34,7 +34,7 @@ const { createAnalysisCache, cacheKey } = await import(dist('lib', 'analysisCach
 // ---------------------------------------------------------------------------
 
 function childEnv(home) {
-  return { ...process.env, HOME: home, USERPROFILE: home, HOMEDRIVE: '', HOMEPATH: '', TZ: 'UTC' };
+  return { ...process.env, CLAUDE_CONFIG_DIR: '', CODEX_HOME: '', HOME: home, USERPROFILE: home, HOMEDRIVE: '', HOMEPATH: '', TZ: 'UTC' };
 }
 
 function runCliUtc(args, home) {

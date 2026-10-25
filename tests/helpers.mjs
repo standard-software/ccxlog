@@ -80,7 +80,8 @@ export function codexQA(projectPath, {
 
 // Run the compiled CLI with a fake HOME so discovery only sees our fixtures.
 export function runCli(args, { home, cwd = ROOT, env: envOverrides = {} } = {}) {
-  const env = { ...process.env, NODE_ENV: 'test', CCXLOG_TEST_NOW: '2026-01-01T12:00:00', ...envOverrides };
+  // CLAUDE_CONFIG_DIR / CODEX_HOME would add the developer's own log home.
+  const env = { ...process.env, NODE_ENV: 'test', CCXLOG_TEST_NOW: '2026-01-01T12:00:00', CLAUDE_CONFIG_DIR: '', CODEX_HOME: '', ...envOverrides };
   if (home) {
     env.HOME = home;
     env.USERPROFILE = home;      // os.homedir() reads USERPROFILE on Windows
